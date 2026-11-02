@@ -32,3 +32,30 @@ def test_every_finding_declares_a_remedy() -> None:
 
 
 # One test_finding_<id> per declared finding, measuring the defect over sweep().
+
+
+import math
+
+from measurement import measure
+
+
+def _log10_gap(index: int, term: str) -> float:
+    m = measure(index)
+    return math.log10(m["expanded"][term]["sigma2"]) - math.log10(m["as_written"][term]["sigma2"])
+
+
+def test_finding_eq10_summand_grouping() -> None:
+    """theorem: for BCn and BCp the two readings of T_iq differ by >= 9 orders on every device."""
+    gaps = {t: [_log10_gap(i, t) for i in range(SWEEP_SIZE)] for t in ("bcn", "bcp")}
+    for term, g in gaps.items():
+        assert len(g) == SWEEP_SIZE
+        assert min(g) >= 9.0, f"{term}: smallest gap {min(g):.2f} orders"
+
+
+def test_finding_floor_claim_depends_on_operator() -> None:
+    """tendency (78/200): rho_n or rho_p >= 0.1 under node-formed currents, never under dPV's operator."""
+    rho = lambda i, reading, t: measure(i)[reading][t]["f"] / measure(i)[reading][t]["sigma2"]  # noqa: E731
+    node = sum(max(rho(i, "continuous", "n"), rho(i, "continuous", "p")) >= 0.1 for i in range(SWEEP_SIZE))
+    dpv = sum(max(rho(i, "expanded", t) for t in ("n", "p")) >= 0.1 for i in range(SWEEP_SIZE))
+    assert node == 78, f"declared rate 78/200, measured {node}/200"
+    assert dpv == 0

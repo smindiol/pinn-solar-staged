@@ -1,0 +1,36 @@
+{
+  "findings": {
+    "eq10_summand_grouping": {
+      "admissible": true,
+      "adoption": {
+        "reason": "the text the remedy replaces is still there",
+        "state": "open"
+      },
+      "impact": {
+        "citedElsewhere": 1,
+        "class": "local",
+        "equations": 1,
+        "introducesNotation": 0
+      },
+      "introduces": [],
+      "reasons": []
+    },
+    "floor_claim_depends_on_operator": {
+      "admissible": true,
+      "adoption": {
+        "reason": "the text the remedy replaces is still there",
+        "state": "open"
+      },
+      "impact": {
+        "citedElsewhere": 0,
+        "class": "local",
+        "equations": 0,
+        "introducesNotation": 0
+      },
+      "introduces": [],
+      "reasons": []
+    }
+  },
+  "revision": "research-concept-entrenamiento-por-etapas-de-una-pinn-no-lineal-para-el-model-r02.md",
+  "revisionSha256": "5d54ea488fc5700039a39334126a3d1a307d2a7a614a5ac08c1d8d9569cd5c0b"
+}

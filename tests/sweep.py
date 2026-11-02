@@ -22,6 +22,7 @@ one configuration; build the backend's own generator from it, e.g.
 from __future__ import annotations
 
 import random
+from functools import lru_cache
 
 SWEEP_SIZE = 200
 SWEEP_BASE = 42 * 10000
@@ -31,16 +32,27 @@ def configuration_seed(index: int) -> int:
     return SWEEP_BASE + index
 
 
-def configuration(index: int) -> dict:
-    """One reproducible configuration of the proposal's objects.
+@lru_cache(maxsize=1)
+def _train_draw() -> tuple:
+    """The sweep's 200 distinct training devices: one seeded draw without replacement from the
+    device-level training split (seed 42), so no two configurations share a device and the
+    validation and test devices are never touched. Imported lazily to keep this module free of
+    array libraries."""
+    from Staged_PINN_Solar import data
 
-    Not `conftest.py`'s shared `rng` fixture: this is a plain function, never
-    a collected pytest item, so it cannot receive a fixture at all -- and it
-    needs a generator seeded per `index`, which the fixture's one fixed
-    `SEED` does not provide anyway. The two stay separate on purpose.
+    train = data.split_devices(data.inventory(), seed=data.SEED).train
+    order = random.Random(SWEEP_BASE).sample(range(len(train)), SWEEP_SIZE)
+    return tuple(train[i] for i in order)
+
+
+def configuration(index: int) -> dict:
+    """One reproducible configuration: a distinct training device of the dPV E1A+E1B set.
+
+    The proposal's varying object is the device (its doping, diffusion lengths and, in E1B, the
+    layer thicknesses), and every property below is measured on the stored reference solution
+    of that device over all its voltages and nodes.
     """
-    rng = random.Random(configuration_seed(index))  # noqa: F841
-    raise NotImplementedError
+    return {"index": index, "seed": configuration_seed(index), "ref": _train_draw()[index]}
 
 
 def sweep(size: int = SWEEP_SIZE):
