@@ -78,3 +78,20 @@ def test_streaming_statistics_equal_batch_statistics() -> None:
     for k in whole.sigma2():
         assert stream.sigma2()[k] == pytest.approx(whole.sigma2()[k], rel=1e-12)
         assert stream.f()[k] == pytest.approx(whole.f()[k], rel=1e-12)
+
+
+def test_reference_sigma_squared_reproduces_the_proposals_table() -> None:
+    """r02 section 4, Eq. (10) and its table (E1A, 400 devices, seed 0): on 100 training devices of
+    the 4096-device set the five sigma_i^2 stay within a factor 1.5 of the tabulated values
+    (Poisson 2.52e-3, BCn 0.204, BCp 0.334, n = p = 1.70e-22), and the spread between the largest
+    and smallest is within 1 order of the '21 orders' of section 1."""
+    from Staged_PINN_Solar import data
+    from Staged_PINN_Solar.scaling import Scales
+    split = data.split_devices(data.inventory(), seed=42)
+    st = loss.measure_reference_statistics(split.train[:100], Scales())
+    s2 = st.sigma2()
+    table = {"poisson": 2.52e-3, "bcn": 0.204, "bcp": 0.334, "n": 1.70e-22, "p": 1.70e-22}
+    for k, v in table.items():
+        assert v / 1.5 < s2[k] < v * 1.5, (k, s2[k], v)
+    spread = np.log10(max(s2.values()) / min(s2.values()))
+    assert 20.0 < spread < 22.0

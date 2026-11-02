@@ -28,6 +28,7 @@ __provenance__ = {
         "streaming_statistics_equal_batch_statistics",
         "reference_solution_closes_the_equations",
         "reference_continuity_closes_with_the_dpv_operator",
+        "reference_sigma_squared_reproduces_the_proposals_table",
     ],
 }
 
@@ -35,7 +36,8 @@ __provenance__ = {
 TERMS = ("poisson", "bcn", "bcp", "n", "p")
 
 
-def reference_terms(dev: Device, scales: Scales, currents: str = "continuous") -> dict:
+def reference_terms(dev: Device, scales: Scales, currents: str = "dpv",
+                    grouping: str = "expanded") -> dict:
     """Summands T_iq of the five residuals on one stored dPV solution.
 
     Domain residuals live at the N-2 interior nodes, contact residuals at the two contacts;
@@ -45,8 +47,14 @@ def reference_terms(dev: Device, scales: Scales, currents: str = "continuous") -
     at the half nodes (logarithmic mean of the density, difference of the quasi-Fermi
     potential), the discretization-independent reading of the equations; "dpv" uses the
     Scharfetter-Gummel interface currents stored with the solution, i.e. the reference's own
-    discrete operator.
+    discrete operator. `grouping` selects how the residuals of Eqs. (5), (7), (9) are split into
+    the summands T_iq that Eq. (10) sums in absolute value: "expanded" separates every term
+    (n, p, Ndop; G, R; n, n_eq), "as_written" keeps each parenthesis as one summand. The
+    expanded reading is the one that reproduces the proposal's own table.
     """
+    if grouping not in ("expanded", "as_written"):
+        raise ValueError(f"grouping must be 'expanded' or 'as_written', got {grouping!r}")
+    expanded = grouping == "expanded"
     if currents not in ("continuous", "dpv"):
         raise ValueError(f"currents must be 'continuous' or 'dpv', got {currents!r}")
     m = device_material(dev, scales)
@@ -60,7 +68,8 @@ def reference_terms(dev: Device, scales: Scales, currents: str = "continuous") -
 
     flux_dx = residuals.staggered_flux_derivative(xh, dev.phi, m.eps_r)
     interior = slice(1, -1)
-    out = {"poisson": residuals.poisson_terms(flux_dx, n[:, interior], p[:, interior],
+    poisson_terms = residuals.poisson_terms if expanded else residuals.poisson_terms_grouped
+    out = {"poisson": poisson_terms(flux_dx, n[:, interior], p[:, interior],
                                               m.Ndop[interior], d)}
 
     def mid(a):
@@ -71,7 +80,7 @@ def reference_terms(dev: Device, scales: Scales, currents: str = "continuous") -
         between two nodes, which is what Eq. (4) makes it."""
         lo, hi = a[..., :-1], a[..., 1:]
         same = np.isclose(lo, hi, rtol=1e-12, atol=0.0)
-        safe = np.where(same, 1.0, hi / lo)
+        safe = np.where(same, 2.0, hi / lo)
         return np.where(same, lo, (hi - lo) / np.log(safe))
 
     Jn = residuals.current_density(mid(m.mu_n), log_mean(n), np.diff(dev.phi_n, axis=-1) / h, d)
@@ -80,14 +89,18 @@ def reference_terms(dev: Device, scales: Scales, currents: str = "continuous") -
         Jn, Jp = dev.J_n, dev.J_p
     dJn = (Jn[:, 1:] - Jn[:, :-1]) / half
     dJp = (Jp[:, 1:] - Jp[:, :-1]) / half
-    out["n"] = residuals.continuity_n_terms(dJn, dev.G[interior], R[:, interior], d)
-    out["p"] = residuals.continuity_p_terms(dJp, dev.G[interior], R[:, interior], d)
+    cont_n = residuals.continuity_n_terms if expanded else residuals.continuity_n_terms_grouped
+    cont_p = residuals.continuity_p_terms if expanded else residuals.continuity_p_terms_grouped
+    out["n"] = cont_n(dJn, dev.G[interior], R[:, interior], d)
+    out["p"] = cont_p(dJp, dev.G[interior], R[:, interior], d)
 
     n_eq, p_eq = carriers.equilibrium_densities(dev.phi_eq, m)
     ends = [0, -1]
-    out["bcn"] = residuals.contact_n_terms(dev.J_n[:, ends], n[:, ends], n_eq[ends],
+    contact_n = residuals.contact_n_terms if expanded else residuals.contact_n_terms_grouped
+    contact_p = residuals.contact_p_terms if expanded else residuals.contact_p_terms_grouped
+    out["bcn"] = contact_n(dev.J_n[:, ends], n[:, ends], n_eq[ends],
                                            np.array([c.S_n0, c.S_n1]))
-    out["bcp"] = residuals.contact_p_terms(dev.J_p[:, ends], p[:, ends], p_eq[ends],
+    out["bcp"] = contact_p(dev.J_p[:, ends], p[:, ends], p_eq[ends],
                                            np.array([c.S_p0, c.S_p1]))
     return out
 

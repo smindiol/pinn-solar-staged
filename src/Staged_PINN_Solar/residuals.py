@@ -25,6 +25,8 @@ __provenance__ = {
         "poisson_terms_sign_convention",
         "contact_residuals_vanish_at_equilibrium",
         "contact_residual_signs",
+        "contact_summand_convention_changes_only_the_scale",
+        "grouped_and_expanded_domain_residuals_agree",
         "staggered_derivative_is_second_order_on_nonuniform_grid",
         "autograd_derivative_matches_analytic",
     ],
@@ -56,6 +58,21 @@ def poisson_terms(flux_dx, n, p, Ndop, delta):
     return (delta ** 2 * flux_dx, -n, p, Ndop + 0.0 * n)
 
 
+def poisson_terms_grouped(flux_dx, n, p, Ndop, delta):
+    """Eq. (5) with the parenthesis (n - p - Ndop) kept as ONE summand."""
+    return (delta ** 2 * flux_dx, -(n - p - Ndop))
+
+
+def continuity_n_terms_grouped(dJn_dx, G, R_total, delta):
+    """Eq. (7) with the parenthesis (G - R_total) kept as ONE summand."""
+    return (delta * dJn_dx, G - R_total)
+
+
+def continuity_p_terms_grouped(dJp_dx, G, R_total, delta):
+    """Eq. (7) with the parenthesis (G - R_total) kept as ONE summand."""
+    return (delta * dJp_dx, -(G - R_total))
+
+
 def current_density(mu, density, dphi_q_dx, delta):
     """Eq. (6): J = delta mu rho d(phi_q)/dx_hat (rho = n with phi_n, rho = p with phi_p)."""
     return delta * mu * density * dphi_q_dx
@@ -77,19 +94,35 @@ def current_balance_terms(dJn_dx, dJp_dx, delta):
 
 
 def contact_n_terms(J_n, n, n_eq, S_n):
-    """Eq. (9), electrons; last axis is (x_hat = 0, x_hat = 1).
+    """Eq. (9), electrons, expanded summands; last axis is (x_hat = 0, x_hat = 1).
 
-    B_n0 = J_n(0) - S_n0 (n(0) - n_eq(0)); B_n1 = J_n(1) + S_n1 (n(1) - n_eq(1)).
+    B_n0 = J_n(0) - S_n0 n(0) + S_n0 n_eq(0); B_n1 = J_n(1) + S_n1 n(1) - S_n1 n_eq(1).
+    Eq. (10) says "the summand q of the residual" without saying whether a parenthesis of
+    Eqs. (5), (7), (9) is one summand or several; the expanded reading (three summands per
+    contact here) is the one that reproduces the magnitudes of the proposal's own table
+    (see `contact_n_terms_grouped` for the parenthesis-as-written reading).
     """
+    sign = np.array([-1.0, 1.0])
+    return (J_n, sign * S_n * n, -sign * S_n * n_eq)
+
+
+def contact_p_terms(J_p, p, p_eq, S_p):
+    """Eq. (9), holes, expanded summands; last axis is (x_hat = 0, x_hat = 1).
+
+    B_p0 = J_p(0) + S_p0 p(0) - S_p0 p_eq(0); B_p1 = J_p(1) - S_p1 p(1) + S_p1 p_eq(1).
+    """
+    sign = np.array([1.0, -1.0])
+    return (J_p, sign * S_p * p, -sign * S_p * p_eq)
+
+
+def contact_n_terms_grouped(J_n, n, n_eq, S_n):
+    """Eq. (9), electrons, with the parenthesis (n - n_eq) kept as ONE summand: (J_n, +-S_n (n - n_eq))."""
     sign = np.array([-1.0, 1.0])
     return (J_n, sign * S_n * (n - n_eq))
 
 
-def contact_p_terms(J_p, p, p_eq, S_p):
-    """Eq. (9), holes; last axis is (x_hat = 0, x_hat = 1).
-
-    B_p0 = J_p(0) + S_p0 (p(0) - p_eq(0)); B_p1 = J_p(1) - S_p1 (p(1) - p_eq(1)).
-    """
+def contact_p_terms_grouped(J_p, p, p_eq, S_p):
+    """Eq. (9), holes, with the parenthesis (p - p_eq) kept as ONE summand: (J_p, +-S_p (p - p_eq))."""
     sign = np.array([1.0, -1.0])
     return (J_p, sign * S_p * (p - p_eq))
 

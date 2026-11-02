@@ -89,3 +89,31 @@ def test_autograd_derivative_matches_analytic() -> None:
     torch.testing.assert_close(g, 3.0 * x.detach() ** 2)
     g2 = R.autograd_derivative(g, x)
     torch.testing.assert_close(g2, 6.0 * x.detach())
+
+
+def test_contact_summand_convention_changes_only_the_scale() -> None:
+    """r02 section 4, Eqs. (9)-(10): splitting (n - n_eq) into two summands leaves the residual
+    R_i unchanged and can only increase sum_q |T_q| (triangle inequality), so it changes sigma_i^2
+    and nothing else."""
+    rng = np.random.default_rng(42)
+    J, n, neq, S = rng.normal(size=2), rng.uniform(size=2), rng.uniform(size=2), rng.uniform(size=2)
+    for expanded, compact in ((R.contact_n_terms, R.contact_n_terms_grouped),
+                              (R.contact_p_terms, R.contact_p_terms_grouped)):
+        te, tc = expanded(J, n, neq, S), compact(J, n, neq, S)
+        assert len(te) == 3 and len(tc) == 2
+        np.testing.assert_allclose(R.residual(te), R.residual(tc), atol=1e-15)
+        assert np.all(R.scale(te) >= R.scale(tc) - 1e-15)
+
+
+def test_grouped_and_expanded_domain_residuals_agree() -> None:
+    """r02 section 4, Eqs. (5), (7), (10): reading the parentheses (n - p - Ndop) and (G - R) as
+    one summand leaves each residual unchanged and can only shrink sum_q |T_q|."""
+    rng = np.random.default_rng(42)
+    flux, n, p, Nd, dJ, G, Rr = (rng.normal(size=11) for _ in range(7))
+    d = 0.05
+    pairs = [(R.poisson_terms(flux, n, p, Nd, d), R.poisson_terms_grouped(flux, n, p, Nd, d)),
+             (R.continuity_n_terms(dJ, G, Rr, d), R.continuity_n_terms_grouped(dJ, G, Rr, d)),
+             (R.continuity_p_terms(dJ, G, Rr, d), R.continuity_p_terms_grouped(dJ, G, Rr, d))]
+    for expanded, grouped in pairs:
+        np.testing.assert_allclose(R.residual(expanded), R.residual(grouped), atol=1e-14)
+        assert np.all(R.scale(expanded) >= R.scale(grouped) - 1e-14)
