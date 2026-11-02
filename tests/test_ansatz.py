@@ -72,3 +72,25 @@ def test_normalized_parameters_match_the_dataset_u() -> None:
         dev = data.load_device(ref)
         got = normalize_xi(dev.xi, dev.xi_specs)
         np.testing.assert_allclose(got, dev.u, atol=1e-12)
+
+
+def test_bounds_cover_the_training_profiles() -> None:
+    """r10 Section 2: D_phi and Y_k^min/max measured on a set of devices contain every one of them,
+    and measuring a union of devices never shrinks a bound."""
+    from Staged_PINN_Solar.ansatz import measure_bounds
+    from Staged_PINN_Solar.scaling import Scales
+
+    refs = data.split_devices(data.inventory(), seed=data.SEED).train[:6]
+    devices = [data.load_device(r) for r in refs]
+    b = measure_bounds(devices[:3])
+    union = measure_bounds(devices)
+    assert b.D_phi > 0.0
+    assert union.D_phi >= b.D_phi
+    assert union.phi_n[0] <= b.phi_n[0] and union.phi_n[1] >= b.phi_n[1]
+    assert union.phi_p[0] <= b.phi_p[0] and union.phi_p[1] >= b.phi_p[1]
+    s = Scales()
+    for d in devices:
+        line = d.phi_eq[0] + (d.phi_eq[-1] + (d.V / s.V_th)[:, None] - d.phi_eq[0]) * d.x_hat[None, :]
+        assert np.max(np.abs(d.phi - line)) <= union.D_phi + 1e-12
+        assert d.phi_n.min() >= union.phi_n[0] and d.phi_n.max() <= union.phi_n[1]
+        assert d.phi_p.min() >= union.phi_p[0] and d.phi_p.max() <= union.phi_p[1]

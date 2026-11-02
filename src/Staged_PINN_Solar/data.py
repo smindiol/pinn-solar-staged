@@ -51,6 +51,8 @@ SOURCES = {
 }
 
 # dpvgen/simulacion.py `_material_e1` and the contacts of `construir("E1", ...)`.
+# Br = 0 is not an assumption: dPV's Material default is Br = 0 and the previous revision (r10, recombination
+# paragraph after Eq. 8) states B_r = 0 in every layer except the perovskite absorber of E3 (2.3e-9 cm^3/s).
 E1_MATERIAL = dict(Chi=3.9, Eg=1.5, eps=9.4, Nc=8e17, Nv=1.8e19, mn=100.0, mp=100.0,
                    Et=0.0, tn=1e-8, tp=1e-8, Br=0.0)
 E1_CONTACT_VELOCITIES_CM_S = dict(Snl=1e7, Snr=0.0, Spl=0.0, Spr=1e7)

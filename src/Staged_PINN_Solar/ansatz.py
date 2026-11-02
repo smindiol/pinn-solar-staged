@@ -3,9 +3,11 @@
 The network itself is an *interface*: any callable ``arch(x_hat, xi_hat) -> (B, 3)``
 returning the raw outputs (u_phi, u_n, u_p) with u_n, u_p in [0, 1]. The
 proposal refers to "the two architectures of the previous proposal" without
-defining them (r02, section 7), so none is shipped here: this is an open gap.
-D_phi and the carrier bounds Y_k^min/max are likewise not given by r02 (they
-belong to the r10 construction it cites) and are therefore explicit inputs.
+defining them (r03, section 7), so none is shipped here: this is an open gap.
+D_phi and the carrier bounds Y_k^min/max are defined by the r10 construction that
+r03 cites unchanged: D_phi = max |phi - phi_lin| and Y_k = the extremes of phi_n,
+phi_p over every training device, voltage and node. `measure_bounds` computes them
+from the training split; `AnsatzBounds` stays a plain container.
 """
 
 from __future__ import annotations
@@ -25,6 +27,7 @@ __provenance__ = {
         "interior_correction_is_bounded_by_d_phi",
         "carrier_outputs_stay_inside_their_bounds",
         "normalized_parameters_match_the_dataset_u",
+        "bounds_cover_the_training_profiles",
     ],
 }
 
@@ -33,11 +36,32 @@ Architecture = Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
 
 @dataclass(frozen=True)
 class AnsatzBounds:
-    """Eq. (3) constants that r02 does not define: D_phi and (Y_min, Y_max) for phi_n, phi_p."""
+    """Eq. (3) constants defined by r10: D_phi and (Y_min, Y_max) for phi_n, phi_p."""
 
     D_phi: float
     phi_n: tuple
     phi_p: tuple
+
+
+def measure_bounds(devices, scales=None) -> AnsatzBounds:
+    """D_phi = max |phi - phi_lin| and the extremes of phi_n, phi_p over training devices (r10, Section 2).
+
+    `devices` yields `data.Device` objects (stream them; nothing is kept). phi_lin is the linear
+    interpolation of the contact potentials with the applied voltage V / V_th at the right contact.
+    """
+    from .scaling import Scales
+
+    scales = scales or Scales()
+    d_phi = 0.0
+    lo = np.array([np.inf, np.inf])
+    hi = np.array([-np.inf, -np.inf])
+    for dev in devices:
+        v_tilde = (np.asarray(dev.V) / scales.V_th)[:, None]
+        line = dev.phi_eq[0] + (dev.phi_eq[-1] + v_tilde - dev.phi_eq[0]) * dev.x_hat[None, :]
+        d_phi = max(d_phi, float(np.max(np.abs(dev.phi - line))))
+        lo = np.minimum(lo, [dev.phi_n.min(), dev.phi_p.min()])
+        hi = np.maximum(hi, [dev.phi_n.max(), dev.phi_p.max()])
+    return AnsatzBounds(D_phi=d_phi, phi_n=(float(lo[0]), float(hi[0])), phi_p=(float(lo[1]), float(hi[1])))
 
 
 def normalize_xi(xi: dict, specs) -> np.ndarray:
