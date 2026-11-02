@@ -14,8 +14,17 @@ from __future__ import annotations
 
 import importlib
 
-MODULES = ["Staged_PINN_Solar.{{MODULE}}"]
-REVISION = "{{REVISION}}"
+MODULES = [
+    "Staged_PINN_Solar.data",
+    "Staged_PINN_Solar.scaling",
+    "Staged_PINN_Solar.ansatz",
+    "Staged_PINN_Solar.carriers",
+    "Staged_PINN_Solar.residuals",
+    "Staged_PINN_Solar.loss",
+    "Staged_PINN_Solar.weights",
+    "Staged_PINN_Solar.optimizers",
+]
+REVISION = "research-concept-entrenamiento-por-etapas-de-una-pinn-no-lineal-para-el-model-r02.md"
 
 
 def _unanswered(value: str) -> bool:

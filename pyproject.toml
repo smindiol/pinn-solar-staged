@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "staged-pinn-solar"
 version = "0.1.0"
 requires-python = ">=3.9"
-dependencies = []
+dependencies = ["numpy", "torch", "h5py"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
