@@ -28,7 +28,7 @@ from .carriers import Material
 from .scaling import Scales
 
 __provenance__ = {
-    "revision": "research-concept-entrenamiento-por-etapas-de-una-pinn-no-lineal-para-el-model-r02.md",
+    "revision": "research-concept-entrenamiento-por-etapas-de-una-pinn-no-lineal-para-el-model-r03.md",
     "sections": ["1", "2"],
     "equations": ["2", "3"],
     "invariants": [

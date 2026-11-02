@@ -24,7 +24,7 @@ MODULES = [
     "Staged_PINN_Solar.weights",
     "Staged_PINN_Solar.optimizers",
 ]
-REVISION = "research-concept-entrenamiento-por-etapas-de-una-pinn-no-lineal-para-el-model-r02.md"
+REVISION = "research-concept-entrenamiento-por-etapas-de-una-pinn-no-lineal-para-el-model-r03.md"
 
 
 def _unanswered(value: str) -> bool:

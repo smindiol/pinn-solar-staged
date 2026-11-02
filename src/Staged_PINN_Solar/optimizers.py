@@ -20,7 +20,7 @@ from typing import Callable
 import torch
 
 __provenance__ = {
-    "revision": "research-concept-entrenamiento-por-etapas-de-una-pinn-no-lineal-para-el-model-r02.md",
+    "revision": "research-concept-entrenamiento-por-etapas-de-una-pinn-no-lineal-para-el-model-r03.md",
     "sections": ["5", "6"],
     "equations": ["14", "15", "16", "17"],
     "invariants": [

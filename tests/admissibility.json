@@ -2,9 +2,17 @@
   "findings": {
     "eq10_summand_grouping": {
       "admissible": true,
+      "adopted": {
+        "matched": [
+          "\\mathcal{R}_i = \\sum_q T_{iq}"
+        ],
+        "revision": "research-concept-entrenamiento-por-etapas-de-una-pinn-no-lineal-para-el-model-r03.md"
+      },
       "adoption": {
-        "reason": "the text the remedy replaces is still there",
-        "state": "open"
+        "matched": [
+          "\\mathcal{R}_i = \\sum_q T_{iq}"
+        ],
+        "state": "adopted"
       },
       "impact": {
         "citedElsewhere": 1,
@@ -17,9 +25,17 @@
     },
     "floor_claim_depends_on_operator": {
       "admissible": true,
+      "adopted": {
+        "matched": [
+          "operador discreto"
+        ],
+        "revision": "research-concept-entrenamiento-por-etapas-de-una-pinn-no-lineal-para-el-model-r03.md"
+      },
       "adoption": {
-        "reason": "the text the remedy replaces is still there",
-        "state": "open"
+        "matched": [
+          "operador discreto"
+        ],
+        "state": "adopted"
       },
       "impact": {
         "citedElsewhere": 0,
@@ -31,6 +47,6 @@
       "reasons": []
     }
   },
-  "revision": "research-concept-entrenamiento-por-etapas-de-una-pinn-no-lineal-para-el-model-r02.md",
-  "revisionSha256": "5d54ea488fc5700039a39334126a3d1a307d2a7a614a5ac08c1d8d9569cd5c0b"
+  "revision": "research-concept-entrenamiento-por-etapas-de-una-pinn-no-lineal-para-el-model-r03.md",
+  "revisionSha256": "a7a36bd5558de7d8d6d5e6fbfa64b978d367219acaf41cfac32608cee0c253a5"
 }

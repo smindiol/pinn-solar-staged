@@ -13,7 +13,7 @@ __implementation__ = {
     # When another skill shares this package, name one revision per
     # document label instead, so each skill reads its own lineage:
     #     "revision": {"proposal": "<filename>", "<label>": "<filename>"},
-    "revision": "research-concept-entrenamiento-por-etapas-de-una-pinn-no-lineal-para-el-model-r02.md",
+    "revision": "research-concept-entrenamiento-por-etapas-de-una-pinn-no-lineal-para-el-model-r03.md",
 
     # What kind of prediction the protocol assumes, over which unit,
     # by which metric and in which direction it is judged, e.g.:

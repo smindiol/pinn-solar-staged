@@ -17,7 +17,7 @@ from .residuals import residual, scale
 from .scaling import Scales
 
 __provenance__ = {
-    "revision": "research-concept-entrenamiento-por-etapas-de-una-pinn-no-lineal-para-el-model-r02.md",
+    "revision": "research-concept-entrenamiento-por-etapas-de-una-pinn-no-lineal-para-el-model-r03.md",
     "sections": ["4"],
     "equations": ["10", "11"],
     "invariants": [
@@ -29,6 +29,8 @@ __provenance__ = {
         "reference_solution_closes_the_equations",
         "reference_continuity_closes_with_the_dpv_operator",
         "reference_sigma_squared_reproduces_the_proposals_table",
+        "sigma_squared_elementary_terms_fixed",
+        "reference_floor_below_unity_with_stated_operator",
     ],
 }
 

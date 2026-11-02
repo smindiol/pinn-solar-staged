@@ -14,7 +14,7 @@ import numpy as np
 import torch
 
 __provenance__ = {
-    "revision": "research-concept-entrenamiento-por-etapas-de-una-pinn-no-lineal-para-el-model-r02.md",
+    "revision": "research-concept-entrenamiento-por-etapas-de-una-pinn-no-lineal-para-el-model-r03.md",
     "sections": ["3"],
     "equations": ["4", "8"],
     "invariants": [

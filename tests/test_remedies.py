@@ -56,34 +56,4 @@ def _spread_orders(sigma2: dict) -> float:
     return math.log10(max(sigma2.values())) - math.log10(min(sigma2.values()))
 
 
-def test_remedy_eq10_summand_grouping() -> None:
-    """Resolves: the explicit reading reproduces the proposal's table within 30% for all five terms.
-    Preserves: the pooled spread of sigma^2 stays >= 20 orders (premise (i) of Section 1).
-    Control: the parenthesis reading misses the contact terms of the table by more than 6 orders."""
-    require_admissible("eq10_summand_grouping")
-    fixed = remedy_eq10_explicit_terms("expanded")
-    per_device = [declared_formulation(i, grouping="as_written") for i in ALL]
-    declared = {t: float(np.mean([d[t][0] for d in per_device])) for t in TERMS}
-    for t in TERMS:
-        assert abs(fixed[t] / PROPOSAL_SIGMA2[t] - 1.0) < 0.30, f"{t}: {fixed[t]:.3e} vs {PROPOSAL_SIGMA2[t]:.3e}"
-    assert _spread_orders(fixed) >= 20.0
-    for t in ("bcn", "bcp"):
-        assert declared[t] < PROPOSAL_SIGMA2[t] * 1e-6
-
-
-def test_remedy_floor_claim_depends_on_operator() -> None:
-    """Resolves: with the dPV operator stated, every rho_i < 1e-3 on all devices.
-    Preserves: sigma^2 of Poisson, BCn and BCp is identical under both operators.
-    Control: the unstated form (node-formed currents is an allowed reading) fails on some devices."""
-    require_admissible("floor_claim_depends_on_operator")
-    stated = max(measure(i)["expanded"][t]["f"] / measure(i)["expanded"][t]["sigma2"]
-                 for i in ALL for t in TERMS)
-    assert stated < 1e-3
-    for i in ALL:
-        for t in ("poisson", "bcn", "bcp"):
-            assert measure(i)["expanded"][t]["sigma2"] == measure(i)["continuous"][t]["sigma2"]
-    unstated = 0.0
-    for i in ALL:
-        d = declared_formulation(i, currents="continuous")
-        unstated = max(unstated, *(d[t][1] / d[t][0] for t in ("n", "p")))
-    assert unstated >= 0.1
+# Both remedies were adopted by r03 and moved to tests/test_loss.py as invariants.

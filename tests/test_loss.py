@@ -95,3 +95,34 @@ def test_reference_sigma_squared_reproduces_the_proposals_table() -> None:
         assert v / 1.5 < s2[k] < v * 1.5, (k, s2[k], v)
     spread = np.log10(max(s2.values()) / min(s2.values()))
     assert 20.0 < spread < 22.0
+
+
+def _swept_pooled(reading: str) -> dict:
+    from measurement import pooled
+    from sweep import SWEEP_SIZE
+
+    return pooled(range(SWEEP_SIZE), reading)
+
+
+def test_sigma_squared_elementary_terms_fixed() -> None:
+    """r03 Eq. (10): T_iq are the separately signed terms of R_i. Read that way, the pooled
+    sigma_i^2 of 200 swept devices reproduce the proposal's table within 30% and span >= 20 orders."""
+    import math
+
+    from measurement import PROPOSAL_SIGMA2, TERMS
+
+    sigma2 = _swept_pooled("expanded")["sigma2"]
+    for t in TERMS:
+        assert abs(sigma2[t] / PROPOSAL_SIGMA2[t] - 1.0) < 0.30, t
+    assert math.log10(max(sigma2.values())) - math.log10(min(sigma2.values())) >= 20.0
+
+
+def test_reference_floor_below_unity_with_stated_operator() -> None:
+    """r03 Section 4: with the discrete operator of dPV (its interface currents) every rho_i is far
+    below one on every swept device."""
+    from measurement import TERMS, measure
+    from sweep import SWEEP_SIZE
+
+    worst = max(measure(i)["expanded"][t]["f"] / measure(i)["expanded"][t]["sigma2"]
+                for i in range(SWEEP_SIZE) for t in TERMS)
+    assert worst < 1e-3

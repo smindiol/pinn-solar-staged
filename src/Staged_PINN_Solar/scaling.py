@@ -17,7 +17,7 @@ from math import sqrt
 import numpy as np
 
 __provenance__ = {
-    "revision": "research-concept-entrenamiento-por-etapas-de-una-pinn-no-lineal-para-el-model-r02.md",
+    "revision": "research-concept-entrenamiento-por-etapas-de-una-pinn-no-lineal-para-el-model-r03.md",
     "sections": ["2"],
     "equations": ["1", "2"],
     "invariants": [
