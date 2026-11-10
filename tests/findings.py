@@ -44,6 +44,7 @@ sound is not the same as adopting it.
 FINDINGS = [
     {
         "id": "eq10_summand_grouping",
+        "document": "proposal",
         "kind": "underspecified",
         "equations": ["10"],
         "remedy_equations": ["10"],
@@ -84,6 +85,7 @@ FINDINGS = [
     },
     {
         "id": "floor_claim_depends_on_operator",
+        "document": "proposal",
         "kind": "overstated-claim",
         "equations": ["10", "11"],
         "remedy_equations": [],
