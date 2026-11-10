@@ -1,0 +1,172 @@
+"""Level 2 invariants of training.py: voltage-continuation training by blocks (Eqs. 3, 10-17, J-V of r10)."""
+
+from __future__ import annotations
+
+from dataclasses import replace
+
+import numpy as np
+import pytest
+import torch
+
+from Staged_PINN_Solar import config as C
+from Staged_PINN_Solar import data, loss, residuals, training, units
+from Staged_PINN_Solar.optimizers import LBFGS
+from Staged_PINN_Solar.scaling import Scales
+
+needs_dataset = pytest.mark.skipif(not (data.local_root() / "s1").exists(), reason="dPV set not available")
+
+CFG = C.smoke().with_(max_stages=3, n_blocks=2, iters_per_block=3)
+
+
+@pytest.fixture(scope="module")
+def prep():
+    return training.prepare(config=CFG)
+
+
+def _spec(uid="e2-A-lbfgs-gradient-s0"):
+    return units.parse_unit(uid)
+
+
+def test_residual_terms_match_the_analytic_derivatives() -> None:
+    """Autograd chain of Eqs. 5-7 and 9: for phi = 1 + 2x + 3x^2, phi_n = x/2, phi_p = -x/5 every derivative is known."""
+    scales, mat = Scales(), training.const_material(Scales())
+
+    class Fake(torch.nn.Module):
+        def forward(self, x, xi, peq0, peq1, V):
+            return 1 + 2 * x + 3 * x ** 2, 0.5 * x, -0.2 * x
+
+    M, B = 4, 2
+    x = torch.tensor([[0.1], [0.3], [0.5], [0.9]], dtype=torch.float64)
+    one = torch.ones(M, 1, dtype=torch.float64)
+    delta, ndop, g = 0.01 * one, 0.7 * one, 0.02 * one
+    batch = dict(x=x, xi=0 * x, peq0=0 * x, peq1=0 * x, delta=delta, ndop=ndop, G=g,
+                 xc=torch.tensor([[0.0], [1.0]] * B, dtype=torch.float64), xic=torch.zeros(2 * B, 1, dtype=torch.float64),
+                 peq0c=torch.zeros(2 * B, 1, dtype=torch.float64), peq1c=torch.zeros(2 * B, 1, dtype=torch.float64),
+                 deltac=0.01 * torch.ones(2 * B, 1, dtype=torch.float64), phi_eq=torch.zeros(B, 2, dtype=torch.float64))
+    contacts = data.device_contacts(scales)
+    res = training.residual_terms(Fake(), batch, 0.0, mat, contacts)
+    from Staged_PINN_Solar import carriers
+    phi, pn, pp = 1 + 2 * x + 3 * x ** 2, 0.5 * x, -0.2 * x
+    m = replace(mat, Ndop=ndop).like(phi)
+    n, p = carriers.electron_density(phi, pn, m), carriers.hole_density(phi, pp, m)
+    want_poisson = 0.01 ** 2 * m.eps_r * 6.0 - n + p + ndop
+    assert torch.allclose(res["poisson"], want_poisson, rtol=1e-12)
+    dn = n * ((2 + 6 * x) + 0.5)                                     # d n / dx
+    dJn = 0.01 * m.mu_n * (dn * 0.5)                                 # J_n = delta mu n (1/2)
+    R = carriers.recombination(n, p, m)
+    assert torch.allclose(res["n"], 0.01 * dJn + g - R, rtol=1e-10)
+    assert res["bcn"].shape == (B, 2) and res["bcp"].shape == (B, 2)
+
+
+@needs_dataset
+def test_statistics_and_bounds_come_from_the_training_split_only(prep) -> None:
+    """sigma_i^2 and the ansatz bounds are measured here, from the training devices of the run itself."""
+    split = data.split_devices(data.inventory(), seed=CFG.split_seed)
+    refs = split.train[:CFG.max_devices]
+    want = loss.measure_reference_statistics(refs, Scales()).sigma2()
+    assert prep.sigma2 == pytest.approx(want, rel=1e-12)
+    assert prep.train.uids == [r.uid for r in refs]
+    assert prep.test.uids == [r.uid for r in split.test[:CFG.max_devices]]
+    assert prep.bounds.D_phi > 0
+
+
+@needs_dataset
+def test_batches_depend_on_seed_and_stage_but_not_on_the_arm(prep) -> None:
+    b1 = training.make_batch(prep.train, 1, 0, CFG, torch.device("cpu"))
+    b2 = training.make_batch(prep.train, 1, 0, CFG, torch.device("cpu"))
+    b3 = training.make_batch(prep.train, 1, 1, CFG, torch.device("cpu"))
+    assert torch.equal(b1["x"], b2["x"]) and not torch.equal(b1["x"], b3["x"])
+    assert b1["x"].shape == (CFG.n_devices_per_batch * CFG.n_nodes_per_device, 1) or b1["x"].shape[0] <= \
+        CFG.n_devices_per_batch * CFG.n_nodes_per_device
+    assert float(b1["x"].min()) > 0.0 and float(b1["x"].max()) < 1.0       # interior nodes only
+
+
+@needs_dataset
+def test_arms_with_the_same_seed_share_the_initialization(prep) -> None:
+    out = [training.initial_parameters(_spec(u), CFG, prep) for u in ("e1-A-normalized-s0", "e2-A-soap-gradient-s0")]
+    assert all(torch.equal(p, q) for p, q in zip(*out))
+    other = training.initial_parameters(_spec("e1-B-normalized-s0"), CFG, prep)
+    assert len(other) != len(out[0])
+
+
+@needs_dataset
+def test_unnormalized_arm_uses_unit_scales(prep) -> None:
+    r = training.train(_spec("e1-A-unnormalized-s0"), prep, CFG)
+    assert set(r["sigma2_used"].values()) == {1.0}
+    r2 = training.train(_spec("e1-A-normalized-s0"), prep, CFG)
+    assert r2["sigma2_used"] == pytest.approx(prep.sigma2)
+
+
+@needs_dataset
+def test_training_step_decreases_loss_on_tiny_problem(prep) -> None:
+    """L-BFGS blocks with Armijo backtracking never end a block above where it started."""
+    r = training.train(_spec("e1-A-normalized-s0"), prep, CFG)
+    for blk in r["blocks"]:
+        assert blk["loss_end"] <= blk["loss_start"] * (1 + 1e-12)
+    assert not r["diverged"] and r["stages_done"] == 3
+
+
+@needs_dataset
+def test_soap_runs_per_parameter_and_decreases_loss(prep) -> None:
+    cfg = CFG.with_(iters_per_block=6, soap_lr=1e-3)
+    r = training.train(_spec("e2-A-soap-fixed-s0"), prep, cfg)
+    first = r["blocks"][0]
+    assert first["loss_end"] < first["loss_start"]
+
+
+@needs_dataset
+def test_lambda_changes_only_between_blocks(prep) -> None:
+    r = training.train(_spec("e2-A-lbfgs-gradient-s0"), prep, CFG)
+    lams = [b["lambda"] for b in r["blocks"]]
+    assert lams[0] == {k: 1.0 for k in lams[0]}                      # the first block runs with lambda = 1
+    assert any(l != lams[0] for l in lams[1:])                       # the update acted between blocks
+    for b in r["blocks"]:
+        assert b["lambda_used_constant"] is True
+    fixed = training.train(_spec("e2-A-lbfgs-fixed-s0"), prep, CFG)
+    assert all(b["lambda"] == {k: 1.0 for k in b["lambda"]} for b in fixed["blocks"])
+
+
+@needs_dataset
+@pytest.mark.parametrize("uid, weighting_resets", [("e2-A-lbfgs-gradient-s0", True), ("e5-A-s0", False)])
+def test_lbfgs_memory_is_reset_at_lambda_updates_only_in_the_reset_arm(prep, monkeypatch, uid, weighting_resets) -> None:
+    calls = []
+    orig = LBFGS.reset
+    monkeypatch.setattr(LBFGS, "reset", lambda self: (calls.append(1), orig(self))[1])
+    training.train(_spec(uid), prep, CFG)
+    stages, blocks = 3, 3 * CFG.n_blocks
+    assert len(calls) == stages + (blocks if weighting_resets else 0)
+
+
+@needs_dataset
+def test_divergence_is_flagged_and_stops_the_run(prep) -> None:
+    r = training.train(_spec("e1-A-unnormalized-s0"), prep, CFG.with_(divergence_factor=1e-12))
+    assert r["diverged"] is True and r["stages_done"] == 0 and len(r["stages"]) == 1
+    assert all(np.isnan(v) for v in r["per_device_error"].values())
+
+
+@needs_dataset
+def test_conditioning_diagnostics_are_recorded_at_init_marks_and_block_ends(prep) -> None:
+    r = training.train(_spec("e1-A-normalized-s0"), prep, CFG)
+    d = r["diagnostics"]
+    kinds = [x["at"] for x in d["records"]]
+    assert kinds[0] == "init" and "mark" in kinds and kinds.count("block_end") == 3 * CFG.n_blocks
+    init = d["records"][0]
+    for k in ("max_share", "log10_norm_ratio", "lambda_max", "mean_trace", "curvature_ratio"):
+        assert k in init and np.isfinite(init[k])
+    assert 0.0 < d["early_max_gradient_share"] <= 1.0
+    assert training.train(_spec("e2-A-lbfgs-fixed-s0"), prep, CFG)["diagnostics"] is None
+
+
+@needs_dataset
+def test_same_seed_reproduces_the_run(prep) -> None:
+    a = training.train(_spec("e2-A-lbfgs-gradient-s1"), prep, CFG)
+    b = training.train(_spec("e2-A-lbfgs-gradient-s1"), prep, CFG)
+    assert a["per_device_error"] == b["per_device_error"]
+    assert a["blocks"][-1]["loss_end"] == b["blocks"][-1]["loss_end"]
+
+
+@needs_dataset
+def test_error_is_relative_pce_percent_per_test_device(prep) -> None:
+    r = training.train(_spec("e1-B-normalized-s0"), prep, CFG)
+    assert set(r["per_device_error"]) == set(prep.test.uids)
+    assert all(np.isfinite(v) and v >= 0 for v in r["per_device_error"].values())
