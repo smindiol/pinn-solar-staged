@@ -21,6 +21,7 @@ __provenance__ = {
     "invariants": [
         "power_iteration_finds_largest_eigenvalue_of_quadratic",
         "hutchinson_trace_exact_on_diagonal",
+        "norm_ratio_ignores_satisfied_terms",
         "hutchinson_trace_converges_on_dense_quadratic",
         "ratio_invariant_to_global_rescaling",
         "gradient_share_is_one_for_single_term",
@@ -76,7 +77,11 @@ def gradient_shares(grads: dict, lam: dict) -> dict:
 
 
 def log10_norm_ratio(grads: dict, lam: dict) -> float:
-    """log10 of the largest over the smallest per-term gradient norm (weighted by lambda)."""
-    norms = [v for v in _weighted_norms(grads, lam).values()]
-    lo = min(norms)
-    return float("inf") if lo == 0.0 else float(np.log10(max(norms) / lo))
+    """log10 of the largest over the smallest NONZERO per-term gradient norm (weighted by lambda).
+
+    A term with zero gradient is satisfied, not competing (the contacts at the equilibrium start), so it
+    is left out; NaN when fewer than two terms remain."""
+    norms = [v for v in _weighted_norms(grads, lam).values() if v > 0.0]
+    if len(norms) < 2:
+        return float("nan")
+    return float(np.log10(max(norms) / min(norms)))

@@ -94,3 +94,21 @@ def test_bounds_cover_the_training_profiles() -> None:
         assert np.max(np.abs(d.phi - line)) <= union.D_phi + 1e-12
         assert d.phi_n.min() >= union.phi_n[0] and d.phi_n.max() <= union.phi_n[1]
         assert d.phi_p.min() >= union.phi_p[0] and d.phi_p.max() <= union.phi_p[1]
+
+
+def test_bounds_contain_the_equilibrium_value() -> None:
+    """phi_n = phi_p = 0 (V = 0, equilibrium) lies strictly inside both boxes, with the margin on each side.
+
+    dPV's stored phi_p peaks at about -1e-8, so the raw extremes leave 0 on (or outside) the edge, where a
+    sigmoid cannot reach it; the box is widened to contain 0 and then by `margin` of its range."""
+    from Staged_PINN_Solar.ansatz import measure_bounds
+
+    refs = data.split_devices(data.inventory(), seed=data.SEED).train[:6]
+    devices = [data.load_device(r) for r in refs]
+    raw = measure_bounds(devices, margin=0.0)
+    b = measure_bounds(devices, margin=0.05)
+    for k in ("phi_n", "phi_p"):
+        lo0, hi0 = min(getattr(raw, k)[0], 0.0), max(getattr(raw, k)[1], 0.0)
+        lo, hi = getattr(b, k)
+        assert lo < 0.0 < hi
+        assert np.isclose(lo, lo0 - 0.05 * (hi0 - lo0)) and np.isclose(hi, hi0 + 0.05 * (hi0 - lo0))

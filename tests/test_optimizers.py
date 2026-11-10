@@ -128,3 +128,17 @@ def test_soap_rotated_update_is_equivariant() -> None:
     Gp = QL.T @ G @ QR
     expected = W - eta * QL @ (Gp / torch.sqrt(Gp ** 2 + eps)) @ QR.T
     torch.testing.assert_close(W1, expected)
+
+
+def test_soap_warmup_scales_the_first_steps_linearly() -> None:
+    """With warmup w, step t moves by lr * min(1, t / w) times the warmup-free step (Vyas et al. warm up SOAP's lr)."""
+    import torch
+    from Staged_PINN_Solar.optimizers import SOAP
+
+    g = torch.Generator().manual_seed(0)
+    W = torch.randn(4, 3, generator=g, dtype=torch.float64)
+    G = torch.randn(4, 3, generator=g, dtype=torch.float64)
+    plain, warm = SOAP(lr=1e-2), SOAP(lr=1e-2, warmup=4)
+    for t in range(1, 7):
+        d_plain, d_warm = plain.step(W, G) - W, warm.step(W, G) - W
+        assert torch.allclose(d_warm, min(1.0, t / 4) * d_plain, rtol=1e-10, atol=1e-14)

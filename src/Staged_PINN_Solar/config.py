@@ -44,7 +44,8 @@ class Config:
     n_nodes_per_device: int = 32                   # PROVISIONAL: 64 devices x 32 nodes ~ previous TDG n_q = 2000 interior points
     alpha_lambda: float = 0.1                      # PROVISIONAL: weights.BlockWeights default (wang2020 anneals with 0.9)
     lbfgs_memory: int = 10                         # PROVISIONAL: optimizers.LBFGS default
-    soap_lr: float = 3e-3                          # PROVISIONAL: optimizers.SOAP default (Vyas et al. default)
+    soap_lr: float = 1e-4                          # PROVISIONAL: measured from the equilibrium start (Adam proxy, 256x4, 200 its): 1e-4 with warmup reaches 0.35 from 0.43; 3e-3 down to 3e-5 without warmup diverge
+    soap_warmup: int = 100                         # PROVISIONAL: linear lr warmup steps (Vyas et al. warm up SOAP); no warmup spikes the loss 400x at lr 1e-5
     soap_precondition_frequency: int = 10          # PROVISIONAL: optimizers.SOAP default (Vyas et al. default)
     pce_tolerance: float = 1e-6                    # PROVISIONAL: relative PCE error of pce_check; previous TDG test asserts 1e-12 absolute
     pce_profile_tolerance: float = 5e-2            # PROVISIONAL: same, for the evaluator that differentiates the stored potentials
@@ -57,6 +58,8 @@ class Config:
     early_marks: tuple = (0, 10, 50)               # PROVISIONAL: iterations of the first block at which the early gradient share is read
     hvp_power_iters: int = 20                      # PROVISIONAL: power-iteration steps for lambda_max
     hvp_probes: int = 10                           # PROVISIONAL: Hutchinson probes for the trace
+    start: str = "equilibrium"                     # PROVISIONAL: phi_n = phi_p = 0, phi = phi_lin at the first stage (previous TDG qf_start="equilibrium"); "random" = plain seeded init
+    qf_box_margin: float = 0.05                    # PROVISIONAL: quasi-Fermi boxes widened to contain 0 and by 5% of their range; 2% and 5% gave the same initial loss
     eval_chunk: int = 32                           # PROVISIONAL: devices per evaluation chunk (memory only, no effect on results)
 
     # --- rehearsal scale (smoke), never a decision of the experiment --------------------------

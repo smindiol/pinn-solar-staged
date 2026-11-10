@@ -157,7 +157,7 @@ def prepare(root=None, config: Config | None = None, progress=None) -> Prepared:
     """Measure sigma_i^2 and the ansatz bounds on the training split and bank the three splits (cached per process)."""
     cfg = config or Config()
     root = Path(root) if root else data.default_root()
-    key = (str(root), cfg.split_seed, cfg.max_devices)
+    key = (str(root), cfg.split_seed, cfg.max_devices, cfg.qf_box_margin)
     if key in _PREPARED:
         return _PREPARED[key]
     scales = Scales()
@@ -175,7 +175,7 @@ def prepare(root=None, config: Config | None = None, progress=None) -> Prepared:
             b.add(dev)
             yield dev
 
-    bounds = ansatz_mod.measure_bounds(tap(train_refs, builder), scales)
+    bounds = ansatz_mod.measure_bounds(tap(train_refs, builder), scales, margin=cfg.qf_box_margin)
     banks = [builder.finish()]
     for refs in (val_refs, test_refs):
         b = _BankBuilder(scales, specs)
@@ -311,9 +311,17 @@ def errors_from_curves(J: np.ndarray, bank: Bank, stages_done: int, scales: Scal
 
 
 # --- the run -----------------------------------------------------------------------------------------
+def build_network(spec: UnitSpec, cfg: Config, prep: Prepared):
+    """The seeded architecture of the unit, set to the equilibrium start unless `cfg.start == "random"`."""
+    if cfg.start not in ("equilibrium", "random"):
+        raise ValueError(f"unknown start {cfg.start!r}")
+    arch = network.build(spec.arch, prep.n_xi, cfg.width, cfg.depth, spec.seed)
+    return network.equilibrium_start(arch, prep.bounds) if cfg.start == "equilibrium" else arch
+
+
 def initial_parameters(spec: UnitSpec, cfg: Config, prep: Prepared) -> list:
     """The initial parameter tensors of (architecture, seed): identical for every arm of that pair."""
-    return [p.detach().clone() for p in network.build(spec.arch, prep.n_xi, cfg.width, cfg.depth, spec.seed).parameters()]
+    return [p.detach().clone() for p in build_network(spec, cfg, prep).parameters()]
 
 
 def _soap_block(params, soaps, objective, lam, iters, history) -> None:
@@ -331,7 +339,7 @@ def train(spec: UnitSpec, prep: Prepared, cfg: Config, eval_val: bool = False, l
           progress=None) -> dict:
     """One run of the experiments. `lam_fixed` (the outer loop of E4) fixes lambda for the whole run."""
     t0, dev = time.time(), device()
-    model = ansatz_mod.Ansatz(network.build(spec.arch, prep.n_xi, cfg.width, cfg.depth, spec.seed).to(dev), prep.bounds)
+    model = ansatz_mod.Ansatz(build_network(spec, cfg, prep).to(dev), prep.bounds)
     params = list(model.parameters())
     sigma2 = dict(prep.sigma2) if spec.loss == "normalized" else {k: 1.0 for k in prep.sigma2}
     lbfgs = LBFGS(memory=cfg.lbfgs_memory)
@@ -339,7 +347,7 @@ def train(spec: UnitSpec, prep: Prepared, cfg: Config, eval_val: bool = False, l
     bw = weights.BlockWeights(alpha=cfg.alpha_lambda, on_update=on_update)
     if lam_fixed is not None:
         bw.values = {"poisson": 1.0, **{k: float(v) for k, v in lam_fixed.items()}}
-    soaps = [SOAP(lr=cfg.soap_lr, precondition_frequency=cfg.soap_precondition_frequency) for _ in params] \
+    soaps = [SOAP(lr=cfg.soap_lr, precondition_frequency=cfg.soap_precondition_frequency, warmup=cfg.soap_warmup) for _ in params] \
         if spec.optimizer == "soap" else None
     diag_on = spec.step == "e1"
     K = min(int(prep.train.n_V.max()), cfg.max_voltages, cfg.max_stages or 10 ** 9)

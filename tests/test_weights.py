@@ -99,3 +99,19 @@ def test_term_gradients_match_autograd() -> None:
     g = W.term_gradients(L, [theta])
     np.testing.assert_allclose(g["poisson"], 2.0 * theta.detach().numpy())
     np.testing.assert_allclose(g["n"], np.array([-2.0, 1.0, 0.0]))
+
+
+def test_satisfied_term_keeps_its_weight() -> None:
+    """A term whose gradient is exactly zero is satisfied (e.g. the contacts at the equilibrium start):
+    Eq. (12) is undefined for it, so its lambda is kept and the other terms still update."""
+    from Staged_PINN_Solar.weights import BlockWeights
+
+    bw = BlockWeights(alpha=0.5)
+    bw.values = {"poisson": 1.0, "bcn": 3.0, "bcp": 1.0, "n": 1.0, "p": 1.0}
+    g = {k: np.full(10, 2.0) for k in bw.values}
+    g["poisson"] = np.full(10, 4.0)
+    g["bcn"] = np.zeros(10)
+    bw.begin_block()
+    out = bw.end_block(g)
+    assert out["bcn"] == 3.0
+    assert out["n"] == pytest.approx(0.5 * 1.0 + 0.5 * 2.0)

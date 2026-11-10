@@ -55,3 +55,10 @@ def test_log10_norm_ratio() -> None:
     g = {"a": np.array([100.0, 0.0]), "b": np.array([0.0, 1.0])}
     assert D.log10_norm_ratio(g, {"a": 1.0, "b": 1.0}) == pytest.approx(2.0)
     assert D.log10_norm_ratio(g, {"a": 1.0, "b": 100.0}) == pytest.approx(0.0)
+
+
+def test_norm_ratio_ignores_satisfied_terms() -> None:
+    """A term with zero gradient is satisfied, not competing: the ratio is taken over the others (NaN if < 2)."""
+    g = {"a": np.array([1.0]), "b": np.array([100.0]), "c": np.zeros(1)}
+    assert D.log10_norm_ratio(g, {"a": 1.0, "b": 1.0, "c": 1.0}) == pytest.approx(2.0)
+    assert np.isnan(D.log10_norm_ratio({"a": np.ones(1), "c": np.zeros(1)}, {"a": 1.0, "c": 1.0}))

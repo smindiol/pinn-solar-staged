@@ -7,6 +7,12 @@
 Inputs are (x_hat, xi_hat); the raw outputs are mapped to the ranges Eq. (3)'s ansatz assumes:
 u_phi = tanh(.) in [-1, 1] (the interior correction is then bounded by D_phi) and
 u_n, u_p = sigmoid(.) in [0, 1]. Everything is float64.
+
+`equilibrium_start` sets the output layer so that the run starts from the known V = 0 solution of the
+quasi-Fermi potentials (phi_n = phi_p = 0) and from phi = phi_lin, instead of from a random point of the
+boxes. From a random start the densities exp(+-(phi - phi_n,p)) are off by tens of thermal voltages and
+the normalized loss starts near 1e34-1e39; from this start every normalized term is O(0.1) (measured on
+dPV, training split, seed 0). The previous TDG used the same start (`qf_start="equilibrium"`).
 """
 
 from __future__ import annotations
@@ -25,6 +31,7 @@ __provenance__ = {
         "activation_is_tanh_times_gaussian",
         "same_seed_gives_same_initialization_and_seeds_differ",
         "float64",
+        "equilibrium_start_gives_zero_quasi_fermi_and_linear_potential",
     ],
 }
 
@@ -79,3 +86,29 @@ def build(kind: str, n_xi: int, width: int = 256, depth: int = 4, seed: int = 0)
         return Architecture(kind, n_xi, width, depth)
     finally:
         torch.random.set_rng_state(state)
+
+
+def equilibrium_start(arch: Architecture, bounds) -> Architecture:
+    """Zero the output rows and set the biases so that u_phi = 0 and phi_n = phi_p = 0 for every input.
+
+    Needs Y_min < 0 < Y_max for both quasi-Fermi boxes (`ansatz.measure_bounds` guarantees it). Only the
+    last layer changes: the hidden layers keep their seeded Kaiming initialization, and the zeroed rows
+    still receive gradient through their weights.
+    """
+    targets = []
+    for lo, hi in (bounds.phi_n, bounds.phi_p):
+        if not lo < 0.0 < hi:
+            raise ValueError(f"equilibrium start needs Y_min < 0 < Y_max, got ({lo}, {hi})")
+        u = -lo / (hi - lo)
+        targets.append(float(torch.logit(torch.tensor(u, dtype=torch.float64))))
+    biases = [0.0] + targets                       # u_phi = tanh(0) = 0; u_k = sigmoid(logit(u_k))
+    with torch.no_grad():
+        if arch.kind == "A":
+            last = arch.nets[0][-1]
+            last.weight.zero_()
+            last.bias.copy_(torch.tensor(biases, dtype=last.bias.dtype))
+        else:
+            for net, b in zip(arch.nets, biases):
+                net[-1].weight.zero_()
+                net[-1].bias.fill_(b)
+    return arch

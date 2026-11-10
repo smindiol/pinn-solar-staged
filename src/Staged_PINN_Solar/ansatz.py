@@ -28,6 +28,7 @@ __provenance__ = {
         "carrier_outputs_stay_inside_their_bounds",
         "normalized_parameters_match_the_dataset_u",
         "bounds_cover_the_training_profiles",
+        "bounds_contain_the_equilibrium_value",
     ],
 }
 
@@ -43,8 +44,13 @@ class AnsatzBounds:
     phi_p: tuple
 
 
-def measure_bounds(devices, scales=None) -> AnsatzBounds:
+def measure_bounds(devices, scales=None, margin: float = 0.05) -> AnsatzBounds:
     """D_phi = max |phi - phi_lin| and the extremes of phi_n, phi_p over training devices (r10, Section 2).
+
+    Each quasi-Fermi box is then widened to contain 0, the equilibrium value at V = 0, and by `margin`
+    of its range on each side. dPV's stored phi_p peaks at about -1e-8, so the raw extremes put 0 on the
+    edge of the box, where the sigmoid of Eq. (3) can never reach it and the equilibrium start is
+    impossible. With margin = 0 only the inclusion of 0 is applied.
 
     `devices` yields `data.Device` objects (stream them; nothing is kept). phi_lin is the linear
     interpolation of the contact potentials with the applied voltage V / V_th at the right contact.
@@ -61,6 +67,9 @@ def measure_bounds(devices, scales=None) -> AnsatzBounds:
         d_phi = max(d_phi, float(np.max(np.abs(dev.phi - line))))
         lo = np.minimum(lo, [dev.phi_n.min(), dev.phi_p.min()])
         hi = np.maximum(hi, [dev.phi_n.max(), dev.phi_p.max()])
+    lo, hi = np.minimum(lo, 0.0), np.maximum(hi, 0.0)
+    pad = margin * (hi - lo)
+    lo, hi = lo - pad, hi + pad
     return AnsatzBounds(D_phi=d_phi, phi_n=(float(lo[0]), float(hi[0])), phi_p=(float(lo[1]), float(hi[1])))
 
 

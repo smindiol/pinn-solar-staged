@@ -53,3 +53,27 @@ def test_same_seed_gives_same_initialization_and_seeds_differ() -> None:
 
 def test_float64() -> None:
     assert all(p.dtype == torch.float64 for p in N.build("B", 4, 16, 2, 0).parameters())
+
+
+def test_equilibrium_start_gives_zero_quasi_fermi_and_linear_potential() -> None:
+    """At the start phi_n = phi_p = 0 exactly (the V = 0 solution) and u_phi = 0 (phi = phi_lin), for any input."""
+    from Staged_PINN_Solar.ansatz import Ansatz, AnsatzBounds
+
+    bounds = AnsatzBounds(D_phi=50.0, phi_n=(-3.0, 44.0), phi_p=(-45.0, 2.0))
+    for arch in "AB":
+        net = N.equilibrium_start(N.build(arch, 4, 16, 2, seed=3), bounds)
+        x, xi = _inputs(64)
+        phi, phi_n, phi_p = Ansatz(net, bounds)(x, xi, torch.zeros_like(x) - 20.0, torch.zeros_like(x) + 20.0, 0.0)
+        assert torch.allclose(phi_n, torch.zeros_like(phi_n), atol=1e-12)
+        assert torch.allclose(phi_p, torch.zeros_like(phi_p), atol=1e-12)
+        assert torch.allclose(phi, -20.0 + 40.0 * x, atol=1e-12)
+        # trainable: the zeroed output rows still receive gradient
+        (phi.sum() + phi_n.sum() + phi_p.sum()).backward()
+        assert all(m[-1].weight.grad.abs().sum() > 0 for m in net.nets)
+
+
+def test_equilibrium_start_refuses_a_box_without_zero() -> None:
+    from Staged_PINN_Solar.ansatz import AnsatzBounds
+
+    with pytest.raises(ValueError):
+        N.equilibrium_start(N.build("A", 4, 16, 2, seed=0), AnsatzBounds(1.0, (0.5, 4.0), (-4.0, 1.0)))

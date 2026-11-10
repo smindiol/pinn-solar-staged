@@ -108,7 +108,7 @@ def test_training_step_decreases_loss_on_tiny_problem(prep) -> None:
 
 @needs_dataset
 def test_soap_runs_per_parameter_and_decreases_loss(prep) -> None:
-    cfg = CFG.with_(iters_per_block=6, soap_lr=1e-3)
+    cfg = CFG.with_(iters_per_block=6)       # config lr and warmup: from the equilibrium start an unramped 1e-3 diverges
     r = training.train(_spec("e2-A-soap-fixed-s0"), prep, cfg)
     first = r["blocks"][0]
     assert first["loss_end"] < first["loss_start"]
@@ -170,3 +170,24 @@ def test_error_is_relative_pce_percent_per_test_device(prep) -> None:
     r = training.train(_spec("e1-B-normalized-s0"), prep, CFG)
     assert set(r["per_device_error"]) == set(prep.test.uids)
     assert all(np.isfinite(v) and v >= 0 for v in r["per_device_error"].values())
+
+
+@needs_dataset
+def test_equilibrium_start_keeps_every_initial_normalized_term_bounded(prep) -> None:
+    """From the equilibrium start every normalized term L_i at V = 0 is finite and O(1), for both
+    architectures; the random start is kept as an explicit control and starts orders of magnitude higher."""
+    from Staged_PINN_Solar import ansatz as ansatz_mod
+
+    dev = torch.device("cpu")
+    batch = training.make_batch(prep.train, 0, 0, CFG, dev)
+
+    def initial(uid, cfg):
+        model = ansatz_mod.Ansatz(training.build_network(_spec(uid), cfg, prep), prep.bounds)
+        losses = training.Objective(model, batch, 0.0, prep.sigma2, prep.material, prep.contacts).losses()
+        return {k: float(v.detach()) for k, v in losses.items()}
+
+    for uid in ("e1-A-normalized-s0", "e1-B-normalized-s0"):
+        eq = initial(uid, CFG)
+        assert all(np.isfinite(v) and v < 10.0 for v in eq.values()), eq
+    rnd = initial("e1-A-normalized-s0", CFG.with_(start="random"))
+    assert max(rnd.values()) > 1e6 * max(eq.values())

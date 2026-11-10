@@ -26,6 +26,7 @@ __provenance__ = {
         "lambda_hat_balances_mean_gradient_magnitudes",
         "moving_average_update_is_convex_and_has_the_fixed_point",
         "poisson_weight_is_the_fixed_reference",
+        "satisfied_term_keeps_its_weight",
         "weights_change_only_between_blocks",
         "update_notifies_the_optimizer_to_reset_its_memory",
         "vanishing_term_gradient_is_refused",
@@ -87,8 +88,13 @@ class BlockWeights:
 
     def end_block(self, grads: dict) -> dict:
         self._in_block = False
-        lh = lambda_hat(grads, self.reference)
-        new = ema_update({k: v for k, v in self.values.items() if k != self.reference}, lh, self.alpha)
+        # A term with zero gradient is exactly satisfied (the contacts at the equilibrium start): Eq. (12)
+        # is undefined for it, so its lambda is kept; every other term updates by Eqs. (12)-(13).
+        live = {k: g for k, g in grads.items()
+                if k == self.reference or float(np.mean(np.abs(g))) > 0.0}
+        lh = lambda_hat(live, self.reference)
+        new = {k: v for k, v in self.values.items() if k != self.reference}
+        new.update(ema_update({k: new[k] for k in lh}, lh, self.alpha))
         self.values = {self.reference: 1.0, **new}
         self.generation += 1
         for cb in self._callbacks:

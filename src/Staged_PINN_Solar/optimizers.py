@@ -25,6 +25,7 @@ __provenance__ = {
     "equations": ["14", "15", "16", "17"],
     "invariants": [
         "lbfgs_inverse_hessian_satisfies_the_secant_condition",
+        "soap_warmup_scales_the_first_steps_linearly",
         "lbfgs_memory_is_bounded_and_reset_clears_it",
         "lbfgs_step_decreases_the_objective_monotonically",
         "lbfgs_reset_on_objective_change_keeps_descending",
@@ -132,8 +133,13 @@ class SOAP:
     """Eqs. (16)-(17) for a single matrix parameter."""
 
     def __init__(self, lr: float = 3e-3, betas=(0.95, 0.95), shampoo_beta: float = 0.95,
-                 eps: float = 1e-8, precondition_frequency: int = 10) -> None:
+                 eps: float = 1e-8, precondition_frequency: int = 10, warmup: int = 0) -> None:
+        """`warmup` > 0 ramps the step size linearly over the first `warmup` steps (Vyas et al. warm up SOAP's
+        learning rate). Adam-type steps are about lr * sign(g) per weight whatever |g| is, and Eq. (3) amplifies
+        the outputs by D_phi and the box widths (tens of thermal voltages) before an exponential, so from the
+        equilibrium start an unramped step overshoots: measured, Adam at lr 1e-5 spikes the loss from 0.43 to 175."""
         self.lr, self.betas, self.shampoo_beta = lr, betas, shampoo_beta
+        self.warmup = int(warmup)
         self.eps, self.freq = eps, precondition_frequency
         self.state = SOAPState()
 
@@ -159,4 +165,5 @@ class SOAP:
         st.v = b2 * st.v + (1.0 - b2) * Gp ** 2
         m_hat = (st.Q_L.T @ st.m @ st.Q_R) / (1.0 - b1 ** st.step)
         v_hat = st.v / (1.0 - b2 ** st.step)
-        return W - self.lr * st.Q_L @ (m_hat / torch.sqrt(v_hat + self.eps)) @ st.Q_R.T
+        lr = self.lr * (min(1.0, st.step / self.warmup) if self.warmup > 0 else 1.0)
+        return W - lr * st.Q_L @ (m_hat / torch.sqrt(v_hat + self.eps)) @ st.Q_R.T
