@@ -160,3 +160,18 @@ def test_smoke_runs_every_training_step_at_rehearsal_scale(tmp_path) -> None:
     res = json.loads((tmp_path / "analysis" / "_smoke" / "analysis.json").read_text())
     assert all(res["experiments"][k]["status"] == "complete" for k in ("E1", "E2", "E3", "E4", "E5"))
     assert (tmp_path / "analysis" / "_smoke" / "report.md").read_text().startswith("# Report tables")
+
+
+def test_results_root_under_the_runner_is_the_working_directory(tmp_path, monkeypatch) -> None:
+    """Under a remote runner (FORGE_CLONE_ROOT set) results land in the process working directory, which is
+    what the runner's fetch collects; the clone is the pinned input. Locally they stay under the product."""
+    from Staged_PINN_Solar import steps
+
+    monkeypatch.delenv(steps.RESULTS_ENV, raising=False)
+    monkeypatch.delenv("FORGE_CLONE_ROOT", raising=False)
+    assert steps.results_root().name == "Results" and steps.results_root().parent.name == steps.PRODUCT
+    monkeypatch.setenv("FORGE_CLONE_ROOT", str(tmp_path / "clone"))
+    monkeypatch.chdir(tmp_path)
+    assert steps.results_root() == tmp_path / "Results"
+    monkeypatch.setenv(steps.RESULTS_ENV, str(tmp_path / "elsewhere"))
+    assert steps.results_root() == tmp_path / "elsewhere"

@@ -156,7 +156,7 @@ _PREPARED: dict = {}
 def prepare(root=None, config: Config | None = None, progress=None) -> Prepared:
     """Measure sigma_i^2 and the ansatz bounds on the training split and bank the three splits (cached per process)."""
     cfg = config or Config()
-    root = Path(root) if root else data.default_root()
+    root = Path(root) if root else data.ensure_dataset()      # downloads the files in a kernel that lacks them
     key = (str(root), cfg.split_seed, cfg.max_devices, cfg.qf_box_margin)
     if key in _PREPARED:
         return _PREPARED[key]

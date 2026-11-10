@@ -68,3 +68,21 @@ def test_device_carries_terminal_current_and_standard_power() -> None:
     dev = data.load_device(data.inventory()[0])
     assert dev.J is not None and dev.J.shape == dev.V.shape
     assert 899.0 < dev.p_in_std < 901.0
+
+
+def test_prepare_ensures_the_dataset_before_reading(monkeypatch, tmp_path) -> None:
+    """`training.prepare` goes through `data.ensure_dataset`, so a kernel without the files downloads them
+    before any read; the root it returns is the one used."""
+    from Staged_PINN_Solar import training, data
+
+    calls = []
+
+    def fake_ensure(slug=data.KAGGLE_DATASET, target=None):
+        calls.append(target)
+        raise RuntimeError("stop here")
+
+    monkeypatch.setattr(data, "ensure_dataset", fake_ensure)
+    training._PREPARED.clear()
+    with pytest.raises(RuntimeError, match="stop here"):
+        training.prepare(None)
+    assert calls == [None]

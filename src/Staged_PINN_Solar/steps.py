@@ -47,8 +47,15 @@ STEPS = ("pce_check", "reference", "e1", "e2", "e5", "e4", "analysis")
 
 
 def results_root() -> Path:
+    """STAGED_PINN_RESULTS if set; under a remote runner (FORGE_CLONE_ROOT exported) the process working
+    directory's Results/, which is what the runner's fetch collects, since the clone is the pinned input and
+    nothing written inside it comes back; locally the product's own Results/."""
     env = os.environ.get(RESULTS_ENV)
-    return Path(env) if env else Path(__file__).resolve().parents[2] / PRODUCT / "Results"
+    if env:
+        return Path(env)
+    if os.environ.get("FORGE_CLONE_ROOT"):
+        return Path.cwd() / "Results"
+    return Path(__file__).resolve().parents[2] / PRODUCT / "Results"
 
 
 def _now() -> str:
