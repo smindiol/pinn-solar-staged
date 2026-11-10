@@ -36,6 +36,9 @@ __provenance__ = {
         "split_is_device_level_80_10_10_and_seeded",
         "loaded_device_respects_dpv_contract",
         "device_material_doping_step_and_contacts",
+        "default_root_prefers_env_then_kaggle_input_then_workspace",
+        "ensure_dataset_downloads_only_the_missing_files",
+        "device_carries_terminal_current_and_standard_power",
     ],
 }
 
@@ -58,11 +61,68 @@ E1_MATERIAL = dict(Chi=3.9, Eg=1.5, eps=9.4, Nc=8e17, Nv=1.8e19, mn=100.0, mp=10
 E1_CONTACT_VELOCITIES_CM_S = dict(Snl=1e7, Snr=0.0, Spl=0.0, Spr=1e7)
 
 
+KAGGLE_DATASET = "sgarizado/dpv-pinn-canonical"
+KAGGLE_INPUT = Path("/kaggle/input")
+
+
+def local_root() -> Path:
+    """The workspace checkout of the reference set: dpv-dataset/salidas next to implementations/."""
+    return Path(__file__).resolve().parents[4] / "dpv-dataset" / "salidas"
+
+
+def _flat_layout_root(base: Path) -> Path | None:
+    """A directory under `base` holding every file of SOURCES by its basename (the Kaggle dataset's flat layout)."""
+    names = {Path(rel).name for rel in SOURCES.values()}
+    if not base.is_dir():
+        return None
+    found: dict[str, Path] = {}
+    for path in sorted(base.rglob("dpv_E1*_b00*.h5")):
+        found.setdefault(path.name, path)
+    if names <= set(found):
+        parents = {found[n].parent for n in names}
+        if len(parents) == 1:
+            return parents.pop()
+    return None
+
+
 def default_root() -> Path:
+    """Where the reference files are, in this order: env DPV_SALIDAS; files found under
+    /kaggle/input in the flat layout; the workspace's dpv-dataset/salidas (dPV's own per-session layout).
+
+    The kagglehub download of `KAGGLE_DATASET` is `ensure_dataset`, not here: choosing a root never
+    touches the network."""
     env = os.environ.get("DPV_SALIDAS")
     if env:
         return Path(env)
-    return Path(__file__).resolve().parents[4] / "dpv-dataset" / "salidas"
+    flat = _flat_layout_root(KAGGLE_INPUT)
+    if flat is not None:
+        return flat
+    return local_root()
+
+
+def source_path(root: Path, rel: str) -> Path:
+    """The file of a SOURCES entry under `root`, in dPV's layout (<session>/<file>) or flat (<file>)."""
+    nested = Path(root) / rel
+    return nested if nested.exists() else Path(root) / Path(rel).name
+
+
+def ensure_dataset(slug: str = KAGGLE_DATASET, target=None) -> Path:
+    """The data root, downloading the four E1A/E1B files with kagglehub when they are missing.
+
+    Mirrors the previous implementation's `ensure_dataset`: inside a Kaggle kernel the in-kernel
+    attach path is switched off (`DISABLE_KAGGLE_CACHE`) and each file is fetched one by one. Nothing
+    is downloaded when `default_root()` already holds every file."""
+    root = Path(target) if target else default_root()
+    missing = [rel for rel in SOURCES.values() if not source_path(root, rel).exists()]
+    if not missing:
+        return root
+    os.environ["DISABLE_KAGGLE_CACHE"] = "1"
+    import kagglehub
+
+    for rel in missing:
+        got = Path(kagglehub.dataset_download(slug, path=Path(rel).name))
+        os.environ["DPV_SALIDAS"] = str(got.parent)
+    return Path(os.environ["DPV_SALIDAS"])
 
 
 @dataclass(frozen=True)
@@ -95,6 +155,8 @@ class Device:
     J_p: np.ndarray
     pce: float               # dPV efficiency (fraction)
     xi_specs: tuple = ()     # per active parameter: (name, scale 'log'|'lin', min, max)
+    J: np.ndarray | None = None   # dPV terminal current per voltage [A/cm^2] (Eq. 13)
+    p_in_std: float = 899.9167906040965   # standard-spectrum power of Eq. 14's denominator [W/m^2]
 
     def delta(self, scales: Scales) -> float:
         """Eq. (2): delta = L_D / L_total = 1 / x_D(L_total)."""
@@ -110,7 +172,7 @@ def inventory(root: Path | None = None) -> list[DeviceRef]:
     root = Path(root) if root else default_root()
     refs: list[DeviceRef] = []
     for (fs, block), rel in SOURCES.items():
-        path = root / rel
+        path = source_path(root, rel)
         with h5py.File(path, "r") as f:
             idx = f["indice/idx"][()]
             estado = f["indice/estado"][()]
@@ -147,7 +209,8 @@ def load_device(ref: DeviceRef) -> Device:
             ref=ref, xi=json.loads(g.attrs["xi"]), u=g["u"][()], V=g["V"][:n_v],
             x_debye=g["x_cm"][()], G=g["G"][()], phi_eq=g["phi_eq"][()],
             phi=pots[:, 0], phi_n=pots[:, 1], phi_p=pots[:, 2],
-            J_n=g["Jn"][:n_v], J_p=g["Jp"][:n_v], pce=float(g.attrs["eff"]), xi_specs=specs)
+            J_n=g["Jn"][:n_v], J_p=g["Jp"][:n_v], pce=float(g.attrs["eff"]), xi_specs=specs,
+            J=g["J"][:n_v], p_in_std=float(g.attrs["P_in_std"]))
 
 
 def device_material(dev: Device, scales: Scales) -> Material:

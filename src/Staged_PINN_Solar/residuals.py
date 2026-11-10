@@ -33,6 +33,16 @@ __provenance__ = {
 }
 
 
+def _on(ref, values):
+    """`values` (numpy) as a tensor of the dtype and device of `ref` when `ref` is a tensor, else unchanged.
+
+    Keeps the per-contact constants (signs, surface velocities) on the backend of the densities they
+    multiply, so the same functions serve the numpy reference and the PINN on any device."""
+    if isinstance(ref, torch.Tensor):
+        return torch.as_tensor(values, dtype=ref.dtype, device=ref.device)
+    return values
+
+
 def _abs(x):
     return torch.abs(x) if isinstance(x, torch.Tensor) else np.abs(x)
 
@@ -102,7 +112,7 @@ def contact_n_terms(J_n, n, n_eq, S_n):
     contact here) is the one that reproduces the magnitudes of the proposal's own table
     (see `contact_n_terms_grouped` for the parenthesis-as-written reading).
     """
-    sign = np.array([-1.0, 1.0])
+    sign, S_n = _on(n, np.array([-1.0, 1.0])), _on(n, S_n)
     return (J_n, sign * S_n * n, -sign * S_n * n_eq)
 
 
@@ -111,19 +121,19 @@ def contact_p_terms(J_p, p, p_eq, S_p):
 
     B_p0 = J_p(0) + S_p0 p(0) - S_p0 p_eq(0); B_p1 = J_p(1) - S_p1 p(1) + S_p1 p_eq(1).
     """
-    sign = np.array([1.0, -1.0])
+    sign, S_p = _on(p, np.array([1.0, -1.0])), _on(p, S_p)
     return (J_p, sign * S_p * p, -sign * S_p * p_eq)
 
 
 def contact_n_terms_grouped(J_n, n, n_eq, S_n):
     """Eq. (9), electrons, with the parenthesis (n - n_eq) kept as ONE summand: (J_n, +-S_n (n - n_eq))."""
-    sign = np.array([-1.0, 1.0])
+    sign, S_n = _on(n, np.array([-1.0, 1.0])), _on(n, S_n)
     return (J_n, sign * S_n * (n - n_eq))
 
 
 def contact_p_terms_grouped(J_p, p, p_eq, S_p):
     """Eq. (9), holes, with the parenthesis (p - p_eq) kept as ONE summand: (J_p, +-S_p (p - p_eq))."""
-    sign = np.array([1.0, -1.0])
+    sign, S_p = _on(p, np.array([1.0, -1.0])), _on(p, S_p)
     return (J_p, sign * S_p * (p - p_eq))
 
 
