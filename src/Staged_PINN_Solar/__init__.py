@@ -49,7 +49,7 @@ __implementation__ = {
 #
 # Example (a repository with no remote service at all still has a ladder):
 #     __levels__ = ["local", "cluster"]
-__levels__: list = []
+__levels__: list = ["full"]
 
 # A callable this repository's own code can run, isolated, under this
 # repository's own venv -- named and resolved statically by the forge
