@@ -50,3 +50,20 @@ def test_shards_cover_without_overlap() -> None:
 def test_unknown_unit_is_refused() -> None:
     with pytest.raises(ValueError):
         U.parse_unit("e9-A-lbfgs-s0")
+
+
+def test_shard_token_expands_to_its_round_robin_slice() -> None:
+    """A requested id `shard-k-of-n` stands for `units.shard(every, n)[k]`, so one kernel carries a whole
+    shard; the n shards are disjoint and exhaustive, and a malformed or out-of-range token is refused."""
+    import pytest
+    from Staged_PINN_Solar import steps, config as C
+
+    every = U.enumerate_units("e1")
+    got = [steps._requested("e1", [f"shard-{k}-of-3"], C.Config(), False) for k in range(3)]
+    assert got == U.shard(every, 3)
+    assert sorted(sum(got, [])) == sorted(every)
+    mixed = steps._requested("e1", ["shard-0-of-20", every[5]], C.Config(), False)
+    assert mixed == [every[0], every[5]]
+    for bad in ("shard-3-of-3", "shard-0-of-0", "shard-x-of-2"):
+        with pytest.raises(ValueError):
+            steps._requested("e1", [bad], C.Config(), False)

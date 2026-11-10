@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 import warnings
 from dataclasses import asdict
@@ -89,6 +90,25 @@ def is_complete(path: Path) -> bool:
         return False
 
 
+_SHARD = re.compile(r"^shard-(\d+)-of-(\d+)$")
+
+
+def _expand_shards(step: str, requested: list, every: list) -> list:
+    """`shard-k-of-n` stands for `units.shard(every, n)[k]`: a remote worker whose job carries that one
+    token runs a whole round-robin slice of the step, so n kernels cover every unit with no waiting."""
+    out = []
+    for uid in requested:
+        m = _SHARD.match(str(uid))
+        if not m:
+            out.append(uid)
+            continue
+        k, n = int(m.group(1)), int(m.group(2))
+        if n < 1 or not 0 <= k < n:
+            raise ValueError(f"shard token {uid!r} of step {step!r} is out of range")
+        out.extend(units.shard(every, n)[k])
+    return out
+
+
 def _requested(step: str, requested, cfg: Config, smoke: bool) -> list:
     every = units.enumerate_units(step, cfg)
     if requested is None:
@@ -96,6 +116,7 @@ def _requested(step: str, requested, cfg: Config, smoke: bool) -> list:
         requested = json.loads(env) if env else None
     if requested is None:
         return every
+    requested = _expand_shards(step, list(requested), every)
     unknown = [u for u in requested if u not in every]
     if unknown:
         raise ValueError(f"not units of step {step!r}: {unknown}; its units are {every[:3]}... ({len(every)})")
