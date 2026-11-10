@@ -10,7 +10,7 @@ from Staged_PINN_Solar import residuals as R
 
 
 def test_current_balance_is_sum_of_continuity_residuals() -> None:
-    """r02 section 3, Eq. (7): R_J = R_n + R_p = delta d(J_n + J_p)/dx_hat,
+    """r03 section 3, Eq. (7): R_J = R_n + R_p = delta d(J_n + J_p)/dx_hat,
     because G and R_total enter R_n and R_p with opposite signs."""
     rng = np.random.default_rng(42)
     dJn, dJp, G, Rr = (rng.normal(size=9) for _ in range(4))
@@ -23,13 +23,13 @@ def test_current_balance_is_sum_of_continuity_residuals() -> None:
 
 
 def test_current_density_definition() -> None:
-    """r02 section 3, Eq. (6): J = delta mu rho d(phi_q)/dx_hat for both carriers."""
+    """r03 section 3, Eq. (6): J = delta mu rho d(phi_q)/dx_hat for both carriers."""
     d, mu, rho, dphi = 2e-3, 3.0, 0.5, -7.0
     assert R.current_density(mu, rho, dphi, d) == pytest.approx(d * mu * rho * dphi, rel=1e-15)
 
 
 def test_poisson_terms_sign_convention() -> None:
-    """r02 section 3, Eq. (5): R_Poisson = delta^2 (eps phi')' - (n - p - Ndop);
+    """r03 section 3, Eq. (5): R_Poisson = delta^2 (eps phi')' - (n - p - Ndop);
     the four summands are exactly these four signed terms."""
     flux_dx, n, p, Nd, d = 2.0, 0.3, 0.1, 0.05, 0.1
     t = R.poisson_terms(flux_dx, n, p, Nd, d)
@@ -39,7 +39,7 @@ def test_poisson_terms_sign_convention() -> None:
 
 
 def test_contact_residuals_vanish_at_equilibrium() -> None:
-    """r02 section 3, Eq. (9): in equilibrium J = 0 and n = n_eq, p = p_eq at
+    """r03 section 3, Eq. (9): in equilibrium J = 0 and n = n_eq, p = p_eq at
     both contacts, so all four Robin residuals are zero for any S."""
     z = np.zeros(2)
     n = np.array([0.3, 0.7])
@@ -52,7 +52,7 @@ def test_contact_residuals_vanish_at_equilibrium() -> None:
 
 
 def test_contact_residual_signs() -> None:
-    """r02 section 3, Eq. (9): B_n0 = J_n(0) - S_n0 (n(0)-n_eq(0)), B_n1 = J_n(1) +
+    """r03 section 3, Eq. (9): B_n0 = J_n(0) - S_n0 (n(0)-n_eq(0)), B_n1 = J_n(1) +
     S_n1 (n(1)-n_eq(1)), B_p0 = J_p(0) + S_p0 (p(0)-p_eq(0)), B_p1 = J_p(1) - S_p1 (p(1)-p_eq(1))."""
     J = np.array([1.5, -2.0])
     n, neq = np.array([4.0, 5.0]), np.array([1.0, 2.0])
@@ -92,7 +92,7 @@ def test_autograd_derivative_matches_analytic() -> None:
 
 
 def test_contact_summand_convention_changes_only_the_scale() -> None:
-    """r02 section 4, Eqs. (9)-(10): splitting (n - n_eq) into two summands leaves the residual
+    """r03 section 4, Eqs. (9)-(10): splitting (n - n_eq) into two summands leaves the residual
     R_i unchanged and can only increase sum_q |T_q| (triangle inequality), so it changes sigma_i^2
     and nothing else."""
     rng = np.random.default_rng(42)
@@ -106,7 +106,7 @@ def test_contact_summand_convention_changes_only_the_scale() -> None:
 
 
 def test_grouped_and_expanded_domain_residuals_agree() -> None:
-    """r02 section 4, Eqs. (5), (7), (10): reading the parentheses (n - p - Ndop) and (G - R) as
+    """r03 section 4, Eqs. (5), (7), (10): reading the parentheses (n - p - Ndop) and (G - R) as
     one summand leaves each residual unchanged and can only shrink sum_q |T_q|."""
     rng = np.random.default_rng(42)
     flux, n, p, Nd, dJ, G, Rr = (rng.normal(size=11) for _ in range(7))

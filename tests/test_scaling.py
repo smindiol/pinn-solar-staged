@@ -11,7 +11,7 @@ from Staged_PINN_Solar.scaling import (
 
 @pytest.mark.parametrize("C0,mu0", [(1e17, 1.0), (1e19, 1.0), (3e18, 25.0)])
 def test_debye_scale_identities(C0, mu0) -> None:
-    """r02 section 2, Eq. (1): G0 = C0/t0 = C0 mu0 kB T/(q L_D^2) and
+    """r03 section 2, Eq. (1): G0 = C0/t0 = C0 mu0 kB T/(q L_D^2) and
     J0 = q C0 L_D/t0 = kB T C0 mu0 / L_D, v0 = L_D/t0."""
     s = Scales(C0=C0, mu0=mu0)
     kT = K_BOLTZMANN * s.T
@@ -23,7 +23,7 @@ def test_debye_scale_identities(C0, mu0) -> None:
 
 
 def test_second_derivative_chain_rule() -> None:
-    """r02 section 2, Eq. (2): d^2/dx_D^2 = delta^2 d^2/dx_hat^2 (checked on
+    """r03 section 2, Eq. (2): d^2/dx_D^2 = delta^2 d^2/dx_hat^2 (checked on
     f = sin(3 x_hat) by central differences in both coordinates)."""
     c = Coordinates(Scales(), L_total_cm=2.0e-4)
     xh = np.linspace(0.2, 0.8, 4001)
@@ -39,7 +39,7 @@ def test_second_derivative_chain_rule() -> None:
 
 
 def test_normalized_coordinate_range() -> None:
-    """r02 section 2, Eq. (2): x_hat = x/L_total maps [0, L_total] onto [0, 1]
+    """r03 section 2, Eq. (2): x_hat = x/L_total maps [0, L_total] onto [0, 1]
     and the map is invertible."""
     L = 3.1e-4
     c = Coordinates(Scales(), L_total_cm=L)

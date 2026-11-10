@@ -21,7 +21,7 @@ def inventory():
 
 
 def test_inventory_is_4096_ok_devices_from_e1a_and_e1b(inventory) -> None:
-    """r02 section 1 / handoff map: the training set is dPV E1A+E1B, 2048 Sobol
+    """r03 section 1 / handoff map: the training set is dPV E1A+E1B, 2048 Sobol
     devices each, 4096 in total, all with state 'ok'; the partial E1B_b001 of
     session s1 (814/1075 done) is NOT used, the complete one of s4 is."""
     assert len(inventory) == 4096
@@ -34,7 +34,7 @@ def test_inventory_is_4096_ok_devices_from_e1a_and_e1b(inventory) -> None:
 
 
 def test_split_is_device_level_80_10_10_and_seeded(inventory) -> None:
-    """r02 section 1 / premises: device-level 80/10/10 split with seed 42:
+    """r03 section 1 / premises: device-level 80/10/10 split with seed 42:
     disjoint, exhaustive, 3277/410/409, reproducible, and seed-dependent."""
     a = data.split_devices(inventory, seed=42)
     b = data.split_devices(inventory, seed=42)

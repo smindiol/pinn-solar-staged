@@ -20,7 +20,7 @@ def _quadratic(n=6, seed=42):
 
 
 def test_lbfgs_inverse_hessian_satisfies_the_secant_condition() -> None:
-    """r02 section 6, Eq. (15): after storing the pair (s_k, y_k), the limited-memory
+    """r03 section 6, Eq. (15): after storing the pair (s_k, y_k), the limited-memory
     approximation maps the newest gradient difference onto the step, H_{k+1} y_k = s_k."""
     A, _ = _quadratic()
     g = torch.Generator().manual_seed(7)
@@ -33,7 +33,7 @@ def test_lbfgs_inverse_hessian_satisfies_the_secant_condition() -> None:
 
 
 def test_lbfgs_memory_is_bounded_and_reset_clears_it() -> None:
-    """r02 section 5-6: the memory keeps the last m pairs and is reset when lambda changes."""
+    """r03 section 5-6: the memory keeps the last m pairs and is reset when lambda changes."""
     A, _ = _quadratic()
     g = torch.Generator().manual_seed(7)
     opt = LBFGS(memory=3)
@@ -48,7 +48,7 @@ def test_lbfgs_memory_is_bounded_and_reset_clears_it() -> None:
 
 
 def test_lbfgs_step_decreases_the_objective_monotonically() -> None:
-    """r02 section 6, Eq. (14): theta_{k+1} = theta_k - a_k H_k grad with a_k from a line
+    """r03 section 6, Eq. (14): theta_{k+1} = theta_k - a_k H_k grad with a_k from a line
     search; the objective must not increase along the iterations."""
     _, fun = _quadratic()
     opt = LBFGS(memory=5)
@@ -59,7 +59,7 @@ def test_lbfgs_step_decreases_the_objective_monotonically() -> None:
 
 
 def test_lbfgs_reset_on_objective_change_keeps_descending() -> None:
-    """r02 section 5: lambda changes between blocks and the memory is reset; the second block
+    """r03 section 5: lambda changes between blocks and the memory is reset; the second block
     started from the first block's endpoint must still decrease the *new* objective."""
     A, fun1 = _quadratic()
     fun2 = lambda x: (0.5 * x @ (2.0 * A) @ x + x.sum(), 2.0 * A @ x + 1.0)
@@ -72,7 +72,7 @@ def test_lbfgs_reset_on_objective_change_keeps_descending() -> None:
 
 
 def test_soap_covariances_are_ema_of_gram_matrices() -> None:
-    """r02 section 6, Eq. (16): P_L and P_R are exponential moving averages of G G^T and
+    """r03 section 6, Eq. (16): P_L and P_R are exponential moving averages of G G^T and
     G^T G; they are symmetric positive semi-definite."""
     g = torch.Generator().manual_seed(42)
     opt = SOAP(lr=1e-2, shampoo_beta=0.9, precondition_frequency=10 ** 9)
@@ -88,7 +88,7 @@ def test_soap_covariances_are_ema_of_gram_matrices() -> None:
 
 
 def test_soap_rotation_matrices_are_orthogonal() -> None:
-    """r02 section 6, Eq. (17): Q_L, Q_R are eigenvector matrices of the symmetric P_L, P_R,
+    """r03 section 6, Eq. (17): Q_L, Q_R are eigenvector matrices of the symmetric P_L, P_R,
     hence orthogonal: Q^T Q = I."""
     g = torch.Generator().manual_seed(42)
     opt = SOAP(lr=1e-2, precondition_frequency=1)
@@ -101,7 +101,7 @@ def test_soap_rotation_matrices_are_orthogonal() -> None:
 
 
 def test_soap_update_matches_equation_17_in_the_identity_basis() -> None:
-    """r02 section 6, Eq. (17): with Q_L = Q_R = I the update is the bias-corrected Adam step
+    """r03 section 6, Eq. (17): with Q_L = Q_R = I the update is the bias-corrected Adam step
     with epsilon *inside* the root: dW = -eta m_hat / sqrt(v_hat + eps_s). One step from zero
     moments gives m_hat = G and v_hat = G^2."""
     g = torch.Generator().manual_seed(42)
@@ -114,7 +114,7 @@ def test_soap_update_matches_equation_17_in_the_identity_basis() -> None:
 
 
 def test_soap_rotated_update_is_equivariant() -> None:
-    """r02 section 6, Eq. (17): dW = -eta Q_L (m'/sqrt(v'+eps)) Q_R^T. With Q fixed to a given
+    """r03 section 6, Eq. (17): dW = -eta Q_L (m'/sqrt(v'+eps)) Q_R^T. With Q fixed to a given
     orthogonal pair the step equals that formula evaluated by hand."""
     g = torch.Generator().manual_seed(1)
     W = torch.randn(3, 2, generator=g, dtype=D)

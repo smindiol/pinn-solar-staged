@@ -34,7 +34,7 @@ def _call(seed, x):
 
 @pytest.mark.parametrize("seed", [42, 43, 44])
 def test_contacts_are_exact_for_any_network(seed) -> None:
-    """r02 section 2, Eq. (3): phi(0) = phi_eq(0) and phi(1) = phi_eq(1) + V_tilde by
+    """r03 section 2, Eq. (3): phi(0) = phi_eq(0) and phi(1) = phi_eq(1) + V_tilde by
     construction, for every parameter value of the network."""
     x = torch.tensor([[0.0], [1.0]], dtype=torch.float64)
     phi, _, _ = _call(seed, x)
@@ -43,7 +43,7 @@ def test_contacts_are_exact_for_any_network(seed) -> None:
 
 
 def test_interior_correction_is_bounded_by_d_phi() -> None:
-    """r02 section 2, Eq. (3): the correction 4 x (1-x) D_phi u_phi has |.| <= D_phi |u_phi|
+    """r03 section 2, Eq. (3): the correction 4 x (1-x) D_phi u_phi has |.| <= D_phi |u_phi|
     since 4 x (1-x) <= 1 on [0, 1]."""
     x = torch.linspace(0, 1, 101, dtype=torch.float64).reshape(-1, 1)
     net = _RandomNet(42)
@@ -56,7 +56,7 @@ def test_interior_correction_is_bounded_by_d_phi() -> None:
 
 
 def test_carrier_outputs_stay_inside_their_bounds() -> None:
-    """r02 section 2, Eq. (3): Y_k = Y_min + (Y_max - Y_min) u_k with u_k in [0, 1] keeps
+    """r03 section 2, Eq. (3): Y_k = Y_min + (Y_max - Y_min) u_k with u_k in [0, 1] keeps
     phi_n in [0, 40] and phi_p in [-40, 0] for every input."""
     x = torch.rand(500, 1, dtype=torch.float64, generator=torch.Generator().manual_seed(42))
     _, pn, pp = _call(42, x)
@@ -65,7 +65,7 @@ def test_carrier_outputs_stay_inside_their_bounds() -> None:
 
 
 def test_normalized_parameters_match_the_dataset_u() -> None:
-    """r02 section 2, Eq. (3): xi_hat = (g(xi) - g_min)/(g_max - g_min) with g = log10 for the
+    """r03 section 2, Eq. (3): xi_hat = (g(xi) - g_min)/(g_max - g_min) with g = log10 for the
     dopings and the identity for thicknesses; it must reproduce the `u` stored with every dPV device."""
     inv = data.inventory()
     for ref in (inv[0], inv[2100], inv[3000]):

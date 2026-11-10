@@ -15,7 +15,7 @@ def _terms(rng, c=1.0):
 
 
 def test_sigma_squared_dominates_residual_squared() -> None:
-    """r02 section 4, Eqs. (10)-(11): |sum_q T_q| <= sum_q |T_q|, hence f_i <= sigma_i^2 and
+    """r03 section 4, Eqs. (10)-(11): |sum_q T_q| <= sum_q |T_q|, hence f_i <= sigma_i^2 and
     rho_i = f_i / sigma_i^2 lies in [0, 1] for every term and every sample."""
     rng = np.random.default_rng(42)
     st = loss.ReferenceStatistics()
@@ -26,7 +26,7 @@ def test_sigma_squared_dominates_residual_squared() -> None:
 
 
 def test_loss_at_reference_equals_rho() -> None:
-    """r02 section 4, Eq. (11): L_i(theta) = <R_i^2>_theta / sigma_i^2, so a network that
+    """r03 section 4, Eq. (11): L_i(theta) = <R_i^2>_theta / sigma_i^2, so a network that
     reproduces the reference (R_i = the reference residual) has L_i = rho_i exactly."""
     rng = np.random.default_rng(42)
     terms = _terms(rng)
@@ -38,7 +38,7 @@ def test_loss_at_reference_equals_rho() -> None:
 
 
 def test_normalization_removes_the_residual_scale() -> None:
-    """r02 section 4, Eq. (11): scaling a residual's summands by c scales sigma_i^2 by c^2 and
+    """r03 section 4, Eq. (11): scaling a residual's summands by c scales sigma_i^2 by c^2 and
     leaves L_i unchanged, even when two terms differ by 21 orders of magnitude."""
     rng = np.random.default_rng(42)
     base = _terms(rng)
@@ -54,7 +54,7 @@ def test_normalization_removes_the_residual_scale() -> None:
 
 
 def test_total_loss_is_the_weighted_sum() -> None:
-    """r02 section 4, Eq. (11): L(theta; lambda) = sum_i lambda_i L_i(theta)."""
+    """r03 section 4, Eq. (11): L(theta; lambda) = sum_i lambda_i L_i(theta)."""
     L = {"poisson": 2.0, "n": 0.5, "p": 4.0}
     lam = {"poisson": 1.0, "n": 10.0, "p": 0.25}
     assert loss.total_loss(L, lam) == pytest.approx(2.0 + 5.0 + 1.0)
@@ -65,7 +65,7 @@ def test_total_loss_is_the_weighted_sum() -> None:
 
 
 def test_streaming_statistics_equal_batch_statistics() -> None:
-    """r02 section 4, Eq. (10): <.>_ref is a pooled mean over nodes, devices and voltages, so
+    """r03 section 4, Eq. (10): <.>_ref is a pooled mean over nodes, devices and voltages, so
     accumulating in chunks must give the same sigma_i^2 and f_i as one batch."""
     rng = np.random.default_rng(42)
     parts = [_terms(rng) for _ in range(3)]
@@ -81,7 +81,7 @@ def test_streaming_statistics_equal_batch_statistics() -> None:
 
 
 def test_reference_sigma_squared_reproduces_the_proposals_table() -> None:
-    """r02 section 4, Eq. (10) and its table (E1A, 400 devices, seed 0): on 100 training devices of
+    """r03 section 4, Eq. (10) and its table (E1A, 400 devices, seed 0): on 100 training devices of
     the 4096-device set the five sigma_i^2 stay within a factor 1.5 of the tabulated values
     (Poisson 2.52e-3, BCn 0.204, BCp 0.334, n = p = 1.70e-22), and the spread between the largest
     and smallest is within 1 order of the '21 orders' of section 1."""

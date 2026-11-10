@@ -16,7 +16,7 @@ def _grads(seed=42):
 
 
 def test_lambda_hat_balances_mean_gradient_magnitudes() -> None:
-    """r02 section 5, Eq. (12): lambda_hat_i = max|grad L_Poisson| / mean|grad L_i|, hence
+    """r03 section 5, Eq. (12): lambda_hat_i = max|grad L_Poisson| / mean|grad L_i|, hence
     mean|lambda_hat_i grad L_i| = max|grad L_Poisson| for every i other than Poisson."""
     g = _grads()
     lh = W.lambda_hat(g, reference="poisson")
@@ -27,7 +27,7 @@ def test_lambda_hat_balances_mean_gradient_magnitudes() -> None:
 
 
 def test_moving_average_update_is_convex_and_has_the_fixed_point() -> None:
-    """r02 section 5, Eq. (13): lambda <- (1-alpha) lambda + alpha lambda_hat is a convex
+    """r03 section 5, Eq. (13): lambda <- (1-alpha) lambda + alpha lambda_hat is a convex
     combination (alpha = 0 keeps, alpha = 1 replaces) and leaves lambda = lambda_hat unchanged."""
     lam, lh = {"n": 2.0, "p": 5.0}, {"n": 10.0, "p": 1.0}
     assert W.ema_update(lam, lh, 0.0) == lam
@@ -38,7 +38,7 @@ def test_moving_average_update_is_convex_and_has_the_fixed_point() -> None:
 
 
 def test_poisson_weight_is_the_fixed_reference() -> None:
-    """r02 section 5: Poisson is the reference term of Eq. (12) (i in I \\ {Poisson}), so its
+    """r03 section 5: Poisson is the reference term of Eq. (12) (i in I \\ {Poisson}), so its
     weight is never updated and stays at 1."""
     bw = W.BlockWeights(names=("poisson", "n", "p"), alpha=0.5)
     bw.begin_block()
@@ -48,7 +48,7 @@ def test_poisson_weight_is_the_fixed_reference() -> None:
 
 
 def test_weights_change_only_between_blocks() -> None:
-    """r02 section 5: lambda is updated only between blocks of iterations, never inside one,
+    """r03 section 5: lambda is updated only between blocks of iterations, never inside one,
     because a quasi-Newton method needs a fixed objective while it accumulates memory."""
     bw = W.BlockWeights(names=("poisson", "n", "p"), alpha=0.5)
     bw.begin_block()
@@ -62,7 +62,7 @@ def test_weights_change_only_between_blocks() -> None:
 
 
 def test_update_notifies_the_optimizer_to_reset_its_memory() -> None:
-    """r02 section 5: the memory of the quasi-Newton method is reset at every lambda update;
+    """r03 section 5: the memory of the quasi-Newton method is reset at every lambda update;
     BlockWeights calls the registered callbacks exactly once per update."""
     calls = []
     bw = W.BlockWeights(names=("poisson", "n", "p"), alpha=0.5, on_update=[lambda: calls.append(1)])
@@ -73,7 +73,7 @@ def test_update_notifies_the_optimizer_to_reset_its_memory() -> None:
 
 
 def test_vanishing_term_gradient_is_refused() -> None:
-    """r02 section 5, Eq. (12): the ratio is undefined when mean|grad L_i| = 0; the weights are
+    """r03 section 5, Eq. (12): the ratio is undefined when mean|grad L_i| = 0; the weights are
     refused instead of inventing a value."""
     g = _grads()
     g["n"] = np.zeros(50)
@@ -82,7 +82,7 @@ def test_vanishing_term_gradient_is_refused() -> None:
 
 
 def test_bayesian_outer_loop_hook_returns_the_best_proposal() -> None:
-    """r02 section 5, alternative: weights chosen by an outer loop. The hook asks a proposer
+    """r03 section 5, alternative: weights chosen by an outer loop. The hook asks a proposer
     for candidate weights, evaluates each (a full inner training in practice) and returns the
     lowest objective; with a deterministic proposer and objective the argmin is known."""
     candidates = iter([{"n": 1.0}, {"n": 3.0}, {"n": 2.0}])

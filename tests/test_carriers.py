@@ -21,7 +21,7 @@ def _material(n: int = 7, **over) -> Material:
 
 
 def test_equilibrium_np_product_is_ni_squared() -> None:
-    """r02 section 3, Eq. (4): with phi_n = phi_p = 0 the Boltzmann densities
+    """r03 section 3, Eq. (4): with phi_n = phi_p = 0 the Boltzmann densities
     satisfy n p = n_i^2 = Nc Nv exp(-Eg) for every phi."""
     m = _material()
     phi = np.linspace(-160.0, -150.0, 7)
@@ -31,7 +31,7 @@ def test_equilibrium_np_product_is_ni_squared() -> None:
 
 
 def test_quasi_fermi_shifts_scale_densities() -> None:
-    """r02 section 3, Eq. (4): n is proportional to exp(phi_n) and p to
+    """r03 section 3, Eq. (4): n is proportional to exp(phi_n) and p to
     exp(-phi_p) at fixed phi."""
     m = _material()
     phi = np.linspace(-160.0, -150.0, 7)
@@ -43,7 +43,7 @@ def test_quasi_fermi_shifts_scale_densities() -> None:
 
 
 def test_recombination_zero_at_equilibrium_and_signed() -> None:
-    """r02 section 3, Eq. (8): R_total vanishes when n p = n_i^2 (phi_n = phi_p = 0)
+    """r03 section 3, Eq. (8): R_total vanishes when n p = n_i^2 (phi_n = phi_p = 0)
     and has the sign of (n p - n_i^2), i.e. of phi_n - phi_p."""
     m = _material()
     phi = np.linspace(-160.0, -150.0, 7)
@@ -57,7 +57,7 @@ def test_recombination_zero_at_equilibrium_and_signed() -> None:
 
 
 def test_recombination_srh_closed_form_and_radiative_term() -> None:
-    """r02 section 3, Eq. (8): with Et = 0 and tau_n = tau_p = tau,
+    """r03 section 3, Eq. (8): with Et = 0 and tau_n = tau_p = tau,
     R = (n p - n_i^2) [Br + 1/(tau (n + p + 2 n_i))]."""
     tau, Br = 1.8e2, 0.4
     m = _material(tau_n=np.full(7, tau), tau_p=np.full(7, tau), Br=np.full(7, Br))
