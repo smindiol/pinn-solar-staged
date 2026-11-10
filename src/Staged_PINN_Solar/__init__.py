@@ -5,7 +5,8 @@ Each module declares the sections and equations it implements in
 test under tests/.
 """
 
-__all__ = ["data", "scaling", "ansatz", "carriers", "residuals", "loss", "weights", "optimizers"]
+__all__ = ["data", "scaling", "ansatz", "carriers", "residuals", "loss", "weights", "optimizers",
+           "config", "units", "stats", "pce", "diagnostics", "network"]
 
 __implementation__ = {
     # The managed revision this declaration is bound to -- a filename under
