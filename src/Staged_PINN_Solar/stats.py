@@ -13,9 +13,8 @@ import numpy as np
 from scipy import stats as sps
 
 __provenance__ = {
-    "revision": "research-concept-entrenamiento-por-etapas-de-una-pinn-no-lineal-para-el-model-r03.md",
-    "sections": ["5", "6"],
-    "equations": ["12", "13", "14", "17"],
+    "revision": "experiments-protocolo-experimental-de-la-pinn-por-etapas-sobre-dpv-v02.md",
+    "sections": ["E1", "E2", "E3", "E4", "E5"],
     "experiments": ["E1", "E2", "E3", "E4", "E5"],
     "invariants": [
         "wilcoxon_matches_scipy",

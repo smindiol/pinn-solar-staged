@@ -13,9 +13,8 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field, replace
 
 __provenance__ = {
-    "revision": "research-concept-entrenamiento-por-etapas-de-una-pinn-no-lineal-para-el-model-r03.md",
-    "sections": ["5", "6"],
-    "equations": ["12", "13", "16", "17"],
+    "revision": "experiments-protocolo-experimental-de-la-pinn-por-etapas-sobre-dpv-v02.md",
+    "sections": ["E1", "E2", "E3", "E4", "E5"],
     "experiments": ["E1", "E2", "E3", "E4", "E5"],
     "invariants": [
         "every_open_parameter_is_marked_provisional",
@@ -73,7 +72,7 @@ class Config:
 
 
 #: Rehearsal scale: 8 devices per split, tiny network, a handful of iterations. Exercises every code path.
-SMOKE = dict(max_devices=8, max_stages=2, n_blocks=2, iters_per_block=3, n_devices_per_batch=8,
+SMOKE = dict(seeds=(0,), bootstrap_resamples=200, max_devices=8, max_stages=4, n_blocks=2, iters_per_block=3, n_devices_per_batch=8,
              n_nodes_per_device=8, width=16, depth=2, hvp_power_iters=3, hvp_probes=2,
              early_marks=(0, 1), bo_trials=3, bo_startup_trials=2, smoke=True)
 

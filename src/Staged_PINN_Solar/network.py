@@ -14,9 +14,8 @@ from __future__ import annotations
 import torch
 
 __provenance__ = {
-    "revision": "research-concept-entrenamiento-por-etapas-de-una-pinn-no-lineal-para-el-model-r03.md",
-    "sections": ["2", "7"],
-    "equations": ["3"],
+    "revision": "experiments-protocolo-experimental-de-la-pinn-por-etapas-sobre-dpv-v02.md",
+    "sections": ["E1", "E2", "E3", "E4", "E5"],
     "experiments": ["E1", "E2", "E3", "E4", "E5"],
     "invariants": [
         "architecture_a_is_one_net_for_three_outputs",

@@ -15,9 +15,8 @@ import numpy as np
 import torch
 
 __provenance__ = {
-    "revision": "research-concept-entrenamiento-por-etapas-de-una-pinn-no-lineal-para-el-model-r03.md",
-    "sections": ["4", "6"],
-    "equations": ["11"],
+    "revision": "experiments-protocolo-experimental-de-la-pinn-por-etapas-sobre-dpv-v02.md",
+    "sections": ["E1"],
     "experiments": ["E1"],
     "invariants": [
         "power_iteration_finds_largest_eigenvalue_of_quadratic",

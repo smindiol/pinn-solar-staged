@@ -1,4 +1,5 @@
-"""Terminal current, J-V sweep and conversion efficiency (Eqs. 13-14) and the `pce_check` prerequisite.
+"""Terminal current, J-V sweep and conversion efficiency (r10 Eqs. 13-14, handoff/historial-TDG, Section 5) and the
+`pce_check` prerequisite. (r03 numbers its own Eqs. 13-14 differently: they are the lambda update and L-BFGS.)
 
 dPV's `spline.calcPmax` is reimplemented as in the previous TDG implementation (a piecewise quadratic
 through (V_j, V_j J_j) with continuous slope and a = 0 on the first piece); the standard-spectrum power
@@ -14,9 +15,8 @@ from . import carriers, residuals
 from .scaling import Scales
 
 __provenance__ = {
-    "revision": "research-concept-entrenamiento-por-etapas-de-una-pinn-no-lineal-para-el-model-r03.md",
-    "sections": ["3", "4"],
-    "equations": ["13", "14"],
+    "revision": "experiments-protocolo-experimental-de-la-pinn-por-etapas-sobre-dpv-v02.md",
+    "sections": ["E1", "E2", "E3", "E4", "E5"],
     "experiments": ["E1", "E2", "E3", "E4", "E5"],
     "invariants": [
         "calcpmax_exact_on_quadratic_power",

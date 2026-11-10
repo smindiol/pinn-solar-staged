@@ -11,9 +11,8 @@ from dataclasses import dataclass
 from .config import Config
 
 __provenance__ = {
-    "revision": "research-concept-entrenamiento-por-etapas-de-una-pinn-no-lineal-para-el-model-r03.md",
-    "sections": ["5", "6", "7"],
-    "equations": ["11", "12", "13", "14", "17"],
+    "revision": "experiments-protocolo-experimental-de-la-pinn-por-etapas-sobre-dpv-v02.md",
+    "sections": ["E1", "E2", "E3", "E4", "E5"],
     "experiments": ["E1", "E2", "E3", "E4", "E5"],
     "invariants": [
         "unit_counts_are_20_40_10_20",
