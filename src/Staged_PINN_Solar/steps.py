@@ -258,7 +258,7 @@ def run_pce_check(units=None, smoke=None, config=None, root=None, out=None, prog
     path = unit_path("pce_check", "pce_check", smoke, out)
     if is_complete(path):
         return todo
-    root = Path(root) if root else data.default_root()
+    root = Path(root) if root else data.ensure_dataset()
     split = data.split_devices(data.inventory(root), seed=cfg.split_seed)
     refs = split.train[:cfg.max_devices] if cfg.max_devices else split.train
     from .scaling import Scales

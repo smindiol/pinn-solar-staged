@@ -86,3 +86,16 @@ def test_prepare_ensures_the_dataset_before_reading(monkeypatch, tmp_path) -> No
     with pytest.raises(RuntimeError, match="stop here"):
         training.prepare(None)
     assert calls == [None]
+
+
+def test_pce_check_ensures_the_dataset_before_reading(monkeypatch, tmp_path) -> None:
+    """`steps.run_pce_check` goes through `data.ensure_dataset` too: in a kernel without the files it must
+    download them (the first Kaggle rehearsal died opening a local path)."""
+    from Staged_PINN_Solar import steps, data
+
+    def fake_ensure(slug=data.KAGGLE_DATASET, target=None):
+        raise RuntimeError("ensured")
+
+    monkeypatch.setattr(data, "ensure_dataset", fake_ensure)
+    with pytest.raises(RuntimeError, match="ensured"):
+        steps.run_pce_check(smoke=True, out=tmp_path, progress=lambda *a: None)
