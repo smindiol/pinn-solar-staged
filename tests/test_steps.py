@@ -175,3 +175,28 @@ def test_results_root_under_the_runner_is_the_working_directory(tmp_path, monkey
     assert steps.results_root() == tmp_path / "Results"
     monkeypatch.setenv(steps.RESULTS_ENV, str(tmp_path / "elsewhere"))
     assert steps.results_root() == tmp_path / "elsewhere"
+
+
+def test_wall_budget_stops_before_a_unit_that_would_not_fit(tmp_path, monkeypatch) -> None:
+    """A kernel has a hard time limit: once elapsed + the longest unit seen would pass `wall_budget_seconds`,
+    no new unit starts, nothing partial is written, and a later call resumes exactly the missing units."""
+    from Staged_PINN_Solar import steps, training, config as C
+
+    clock = {"t": 0.0}
+    monkeypatch.setattr(steps.time, "time", lambda: clock["t"])
+    monkeypatch.setattr(training, "prepare", lambda root=None, config=None, progress=None: None)
+    monkeypatch.setattr(steps.data, "default_root", lambda: tmp_path)
+
+    def fake_train(spec, prep, cfg, **kw):
+        clock["t"] += 40.0
+        return {"diverged": False, "per_device_error": {}}
+
+    monkeypatch.setattr(training, "train", fake_train)
+    uids = U_list = ["e1-A-normalized-s0", "e1-A-normalized-s1", "e1-A-normalized-s2"]
+    cfg = C.Config().with_(wall_budget_seconds=100.0)
+    done = steps._run_training_step("e1", uids, False, cfg, out=tmp_path, progress=lambda *a: None)
+    assert done == uids[:2]                                     # 0 -> 40 -> 80; 80 + 40 > 100: stop
+    assert not steps.unit_path("e1", uids[2], False, tmp_path).exists()
+    clock["t"] = 0.0
+    done = steps._run_training_step("e1", uids, False, cfg, out=tmp_path, progress=lambda *a: None)
+    assert done == uids                                         # resumes only the missing one

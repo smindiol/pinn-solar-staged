@@ -138,7 +138,27 @@ def _record(step, uid, cfg, prep, smoke, body: dict) -> dict:
 
 
 # --- training steps ------------------------------------------------------------------------------------
-def _run_bayes(spec, prep, cfg, uid, smoke, root) -> dict:
+class _OutOfBudget(Exception):
+    """The next unit or Bayesian trial would not finish inside the kernel's wall budget."""
+
+
+class _Budget:
+    """Wall-clock guard of one kernel: a piece of work starts only if elapsed + the longest piece seen so far
+    still fits in `seconds`. A remote session that hits its hard limit returns nothing, so stopping early with
+    every finished unit (and every cached trial) on disk is what makes the next wave resume instead of redo."""
+
+    def __init__(self, seconds: float) -> None:
+        self.seconds, self.start, self.longest = float(seconds), time.time(), 0.0
+
+    def check(self) -> None:
+        if time.time() - self.start + self.longest > self.seconds:
+            raise _OutOfBudget()
+
+    def took(self, seconds: float) -> None:
+        self.longest = max(self.longest, float(seconds))
+
+
+def _run_bayes(spec, prep, cfg, uid, smoke, root, budget: _Budget | None = None) -> dict:
     """E4: an outer loop (optuna GPSampler) over log10 lambda_i, i != Poisson; each evaluation is a full inner
     training scored on the VALIDATION devices. Trials are cached beside the unit so a resume replays them."""
     import optuna
@@ -165,7 +185,12 @@ def _run_bayes(spec, prep, cfg, uid, smoke, root) -> dict:
         state["k"] += 1
         if k < len(cache) and all(np.isclose(cache[k]["lambda"][n], lam[n], rtol=1e-6) for n in names):
             return cache[k]["objective"]
+        if budget is not None:
+            budget.check()
+        t_trial = time.time()
         r = training.train(spec, prep, cfg, eval_val=True, lam_fixed=lam)
+        if budget is not None:
+            budget.took(time.time() - t_trial)
         val = np.array(list(r["per_device_error_val"].values()))
         obj = cfg.bo_diverged_penalty if (r["diverged"] or not np.isfinite(val).any()) else float(np.nanmean(val))
         entry = {"index": k, "lambda": lam, "objective": obj, "diverged": r["diverged"], "seconds": r["seconds"],
@@ -195,6 +220,7 @@ def _run_training_step(step: str, units_arg, smoke, config, root=None, out=None,
     done = []
     pending = [u for u in todo if not is_complete(unit_path(step, u, smoke, out))]
     prep = training.prepare(root, cfg) if pending else None
+    budget = _Budget(cfg.wall_budget_seconds)
     for uid in todo:
         path = unit_path(step, uid, smoke, out)
         if uid not in pending:
@@ -202,11 +228,17 @@ def _run_training_step(step: str, units_arg, smoke, config, root=None, out=None,
             done.append(uid)
             continue
         spec = units.parse_unit(uid)
-        t0 = time.time()
-        if step == "e4":
-            body = _run_bayes(spec, prep, cfg, uid, smoke, out)
-        else:
-            body = training.train(spec, prep, cfg)
+        try:
+            if step != "e4":
+                budget.check()
+            t0 = time.time()
+            body = _run_bayes(spec, prep, cfg, uid, smoke, out, budget) if step == "e4" \
+                else training.train(spec, prep, cfg)
+        except _OutOfBudget:
+            progress(f"[{step}] wall budget reached before {uid}: stopping; a later run resumes the rest")
+            break
+        if step != "e4":
+            budget.took(time.time() - t0)
         body["spec"] = asdict(spec)
         body["wall_seconds"] = time.time() - t0
         _write(path, _record(step, uid, cfg, prep, smoke, body))

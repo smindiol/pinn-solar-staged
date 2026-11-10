@@ -60,6 +60,7 @@ class Config:
     hvp_probes: int = 10                           # PROVISIONAL: Hutchinson probes for the trace
     start: str = "equilibrium"                     # PROVISIONAL: phi_n = phi_p = 0, phi = phi_lin at the first stage (previous TDG qf_start="equilibrium"); "random" = plain seeded init
     qf_box_margin: float = 0.05                    # PROVISIONAL: quasi-Fermi boxes widened to contain 0 and by 5% of their range; 2% and 5% gave the same initial loss
+    wall_budget_seconds: float = 39600.0           # PROVISIONAL: Kaggle stops a session at 12 h; 11 h leaves room for setup, the dataset download and the output upload
     eval_chunk: int = 32                           # PROVISIONAL: devices per evaluation chunk (memory only, no effect on results)
 
     # --- rehearsal scale (smoke), never a decision of the experiment --------------------------
