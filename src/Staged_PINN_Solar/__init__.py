@@ -6,7 +6,7 @@ test under tests/.
 """
 
 __all__ = ["data", "scaling", "ansatz", "carriers", "residuals", "loss", "weights", "optimizers",
-           "config", "units", "stats", "pce", "diagnostics", "network"]
+           "config", "units", "stats", "pce", "diagnostics", "network", "training", "steps"]
 
 __implementation__ = {
     # The managed revision this declaration is bound to -- a filename under
@@ -179,7 +179,50 @@ __levels__: list = []
 #             "placement": "local",
 #         },
 #     }
-__steps__: dict = {}
+__steps__: dict = {
+    # Every step runs remotely on Kaggle (operator, 2026-11-10: "cambia todo a la nube, usa todas las cuentas ...").
+    # Training steps are decomposable into independent UNITS (one (experiment, arm, arch, seed) run each,
+    # `units.enumerate_units`): the function accepts a list of unit ids (or FORGE_RUN_UNITS), writes one result
+    # file per unit under its own Results/<step>/ root, and resumes by skipping complete ones. No training step
+    # reads another's output: each measures sigma_i^2 and the ansatz bounds itself from the training split.
+    # `analysis` is remote too but naturally runs after the others: it reads their Results roots.
+    "pce_check": {
+        "module": "Staged_PINN_Solar.steps", "function": "run_pce_check", "reads": [],
+        "produces": ["Results/pce_check", "Notebooks/pce_check.ipynb"],
+        "placement": "remote", "job": "pce_check", "service": "kaggle",
+    },
+    "reference": {
+        "module": "Staged_PINN_Solar.steps", "function": "run_reference", "reads": [],
+        "produces": ["Results/reference", "Notebooks/reference.ipynb"],
+        "placement": "remote", "job": "reference", "service": "kaggle",
+    },
+    "e1": {
+        "module": "Staged_PINN_Solar.steps", "function": "run_e1", "reads": [],
+        "produces": ["Results/e1", "Notebooks/e1.ipynb"],
+        "placement": "remote", "job": "e1", "service": "kaggle",
+    },
+    "e2": {
+        "module": "Staged_PINN_Solar.steps", "function": "run_e2", "reads": [],
+        "produces": ["Results/e2", "Notebooks/e2.ipynb"],
+        "placement": "remote", "job": "e2", "service": "kaggle",
+    },
+    "e5": {
+        "module": "Staged_PINN_Solar.steps", "function": "run_e5", "reads": [],
+        "produces": ["Results/e5", "Notebooks/e5.ipynb"],
+        "placement": "remote", "job": "e5", "service": "kaggle",
+    },
+    "e4": {
+        "module": "Staged_PINN_Solar.steps", "function": "run_e4", "reads": [],
+        "produces": ["Results/e4", "Notebooks/e4.ipynb"],
+        "placement": "remote", "job": "e4", "service": "kaggle",
+    },
+    "analysis": {
+        "module": "Staged_PINN_Solar.steps", "function": "run_analysis",
+        "reads": ["Results/e1", "Results/e2", "Results/e4", "Results/e5"],
+        "produces": ["Results/analysis", "Notebooks/analysis.ipynb"],
+        "placement": "remote", "job": "analysis", "service": "kaggle",
+    },
+}
 
 # A target-chosen name mapped to the record it addresses -- a leveled
 # `@record:level <name>` witness in AGREED.md's position section reaches
