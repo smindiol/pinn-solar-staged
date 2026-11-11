@@ -100,10 +100,10 @@ def _synthetic_results(tmp_path, cfg, n_dev=60, seed=0):
     for step in ("e1", "e2", "e5", "e4"):
         for uid in units.enumerate_units(step, cfg):
             spec = units.parse_unit(uid)
-            worse = {"e1": spec.loss == "unnormalized",
+            worse = {"e1": spec.loss != "relative",
                      "e2": spec.weighting == "fixed" or spec.optimizer == "soap",
                      "e5": True, "e4": False}[step]
-            shift = {"e1": 0.5 * worse, "e5": 0.5, "e4": 0.0,
+            shift = {"e1": 0.5 * (spec.loss == "unnormalized") + 0.3 * (spec.loss == "normalized"), "e5": 0.5, "e4": 0.0,
                      "e2": 0.5 * (spec.weighting == "fixed") + 0.3 * (spec.optimizer == "soap")}[step]
             err = base + shift + 0.05 * rng.normal(size=n_dev)
             rec = {"unit": uid, "complete": True, "spec": spec.__dict__, "diverged": False,
@@ -123,9 +123,9 @@ def test_analysis_applies_the_decision_rule_to_unit_results(tmp_path) -> None:
     res = steps.analyse(root=tmp_path, config=cfg)
     ex = res["experiments"]
     assert all(ex[k]["status"] == "complete" for k in ("E1", "E2", "E3", "E4", "E5"))
-    for a in "AB":
-        c = ex["E1"]["comparisons"][a]
-        assert c["winner"] == "A" and c["p_holm"] < 0.05 and c["normalized_better"] is False   # same divergence counts
+    assert set(ex["E1"]["comparisons"]) == {f"{a}|vs_{c}" for a in "AB" for c in ("normalized", "unnormalized")}
+    for c in ex["E1"]["comparisons"].values():
+        assert c["winner"] == "A" and c["p_holm"] < 0.05 and c["relative_better"] is True   # same divergence counts: not more
         assert c["causal_lower_diagnostics_at_init"] is True
     assert all(c["winner"] == "A" for c in ex["E2"]["comparisons"].values())          # gradient statistics better
     assert set(ex["E2"]["comparisons"]) == {"lbfgs|A", "lbfgs|B", "soap|A", "soap|B"}
@@ -151,7 +151,7 @@ def test_analysis_reports_missing_units_instead_of_guessing(tmp_path) -> None:
 def test_smoke_runs_every_training_step_at_rehearsal_scale(tmp_path) -> None:
     for fn in (steps.smoke_reference, steps.smoke_pce_check, steps.smoke_e1, steps.smoke_e2, steps.smoke_e5, steps.smoke_e4):
         fn(out=tmp_path)
-    assert len(list((tmp_path / "e1" / "_smoke").glob("e1-*.json"))) == 4             # seed 0 only: 2 archs x 2 losses
+    assert len(list((tmp_path / "e1" / "_smoke").glob("e1-*.json"))) == 6             # seed 0 only: 2 archs x 3 losses
     assert len(list((tmp_path / "e2" / "_smoke").glob("e2-*.json"))) == 8
     assert len(list((tmp_path / "e5" / "_smoke").glob("e5-*.json"))) == 2
     assert len(list((tmp_path / "e4" / "_smoke").glob("e4-*-s0.json"))) == 4

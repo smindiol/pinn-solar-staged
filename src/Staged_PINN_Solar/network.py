@@ -1,4 +1,4 @@
-"""The two architectures of the protocol (experiments v02, "Arquitecturas del protocolo").
+"""The two architectures of the protocol (experiments v03, "Arquitecturas del protocolo").
 
 * A: a Kaiming-initialized perceptron of width 256 and depth 4 with the activation of zhang2025,
   tanh(z) exp(-z^2/2), no Fourier features, ONE network for the three outputs (phi, phi_n, phi_p).
@@ -20,7 +20,7 @@ from __future__ import annotations
 import torch
 
 __provenance__ = {
-    "revision": "experiments-protocolo-experimental-de-la-pinn-por-etapas-sobre-dpv-v02.md",
+    "revision": "experiments-protocolo-experimental-de-la-pinn-por-etapas-sobre-dpv-v03.md",
     "sections": ["E1", "E2", "E3", "E4", "E5"],
     "experiments": ["E1", "E2", "E3", "E4", "E5"],
     "invariants": [

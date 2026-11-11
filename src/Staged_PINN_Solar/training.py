@@ -37,7 +37,7 @@ from .scaling import Scales
 from .units import UnitSpec
 
 __provenance__ = {
-    "revision": "experiments-protocolo-experimental-de-la-pinn-por-etapas-sobre-dpv-v02.md",
+    "revision": "experiments-protocolo-experimental-de-la-pinn-por-etapas-sobre-dpv-v03.md",
     "sections": ["E1", "E2", "E3", "E4", "E5"],
     "experiments": ["E1", "E2", "E3", "E4", "E5"],
     "invariants": [
@@ -46,6 +46,9 @@ __provenance__ = {
         "batches_depend_on_seed_and_stage_but_not_on_the_arm",
         "arms_with_the_same_seed_share_the_initialization",
         "unnormalized_arm_uses_unit_scales",
+        "relative_arm_uses_the_per_node_residual",
+        "full_batch_chunks_give_the_same_loss_and_gradient_as_one_batch",
+        "gradient_weights_never_exceed_lambda_max",
         "training_step_decreases_loss_on_tiny_problem",
         "soap_runs_per_parameter_and_decreases_loss",
         "lambda_changes_only_between_blocks",
@@ -194,6 +197,22 @@ def _t(a, dev):
     return torch.as_tensor(np.ascontiguousarray(a), dtype=torch.float64, device=dev)
 
 
+def make_batches(bank: Bank, stage: int, seed: int, cfg: Config, dev) -> list:
+    """The training set of one stage as a list of chunks. `cfg.full_batch` (r04, Section 6): every eligible
+    device and every interior node, in chunks of `cfg.train_chunk_devices` devices; otherwise one sampled
+    chunk of `n_devices_per_batch` x `n_nodes_per_device` (the T4 regime)."""
+    if not cfg.full_batch:
+        return [make_batch(bank, stage, seed, cfg, dev)]
+    eligible = np.nonzero(bank.n_V > stage)[0]
+    n_nodes = bank.x_hat.shape[1]
+    out = []
+    for start in range(0, eligible.size, cfg.train_chunk_devices):
+        pick = eligible[start:start + cfg.train_chunk_devices]
+        idx = np.tile(np.arange(1, n_nodes - 1), (pick.size, 1))
+        out.append(_gather(bank, pick, idx, dev))
+    return out
+
+
 def make_batch(bank: Bank, stage: int, seed: int, cfg: Config, dev) -> dict:
     """Interior nodes (and both contacts) of the devices whose stored curve reaches `stage`: a function of (seed, stage)."""
     eligible = np.nonzero(bank.n_V > stage)[0]
@@ -202,6 +221,11 @@ def make_batch(bank: Bank, stage: int, seed: int, cfg: Config, dev) -> dict:
     n_nodes = bank.x_hat.shape[1]
     k = min(cfg.n_nodes_per_device, n_nodes - 2)
     idx = np.argsort(rng.random((pick.size, n_nodes - 2)), axis=1)[:, :k] + 1
+    return _gather(bank, pick, idx, dev)
+
+
+def _gather(bank: Bank, pick: np.ndarray, idx: np.ndarray, dev) -> dict:
+    k = idx.shape[1]
     rows = pick[:, None]
     rep = lambda a: np.repeat(a[pick], k, axis=0).reshape(-1, a.shape[1] if a.ndim > 1 else 1)
     col = lambda a: np.repeat(a[pick], k)[:, None]
@@ -221,8 +245,8 @@ def make_batch(bank: Bank, stage: int, seed: int, cfg: Config, dev) -> dict:
 
 
 # --- residuals and loss ----------------------------------------------------------------------------
-def residual_terms(model, b: dict, V_tilde: float, mat: Material, contacts) -> dict:
-    """R_i of Eqs. (5), (7), (9) on a batch, by autograd on the ansatz `model(x, xi, peq0, peq1, V_tilde)`."""
+def term_summands(model, b: dict, V_tilde: float, mat: Material, contacts) -> dict:
+    """Summands T_iq of Eqs. (5), (7), (9) on a batch, by autograd on the ansatz `model(x, xi, peq0, peq1, V_tilde)`."""
     x = b["x"].clone().requires_grad_(True)
     phi, phi_n, phi_p = model(x, b["xi"], b["peq0"], b["peq1"], V_tilde)
     m = replace(mat, Ndop=b["ndop"]).like(phi)
@@ -246,19 +270,53 @@ def residual_terms(model, b: dict, V_tilde: float, mat: Material, contacts) -> d
     nc, pc = nc.reshape(-1, 2), pc.reshape(-1, 2)
     terms["bcn"] = residuals.contact_n_terms(Jnc, nc, n_eq, np.array([contacts.S_n0, contacts.S_n1]))
     terms["bcp"] = residuals.contact_p_terms(Jpc, pc, p_eq, np.array([contacts.S_p0, contacts.S_p1]))
-    return {k: residuals.residual(v) for k, v in terms.items()}
+    return terms
+
+
+def residual_terms(model, b: dict, V_tilde: float, mat: Material, contacts) -> dict:
+    """R_i = sum_q T_iq of Eqs. (5), (7), (9) on a batch."""
+    return {k: residuals.residual(v) for k, v in term_summands(model, b, V_tilde, mat, contacts).items()}
+
+
+LOSS_MODES = ("relative", "normalized", "unnormalized")
 
 
 class Objective:
-    """Eq. (11) on one fixed batch at one voltage."""
+    """The loss of one voltage on one fixed batch, or on a list of chunks whose union is the full batch.
 
-    def __init__(self, model, batch, V_tilde, sigma2, mat, contacts) -> None:
-        self.model, self.batch, self.V, self.sigma2 = model, batch, V_tilde, sigma2
+    `mode`: "relative" = Eqs. (10)-(11) of r04 with eps_i = sqrt(sigma2_i); "normalized" = Eq. (11) of r03
+    (global sigma2_i); "unnormalized" = sigma2_i = 1. Over chunks every L_i is the mean over the union
+    of the chunks' nodes (chunk means weighted by their node counts), so the gradient of `total` is the
+    exact full-batch gradient whatever the chunking."""
+
+    def __init__(self, model, batch, V_tilde, sigma2, mat, contacts, mode: str = "normalized") -> None:
+        if mode not in LOSS_MODES:
+            raise ValueError(f"mode must be one of {LOSS_MODES}, got {mode!r}")
+        self.chunks = list(batch) if isinstance(batch, (list, tuple)) else [batch]
+        self.batch = self.chunks[0]
+        self.model, self.V, self.sigma2, self.mode = model, V_tilde, sigma2, mode
         self.mat, self.contacts = mat, contacts
+        self.eps = loss.residual_floor(sigma2)
+        self.n_devices = int(sum(len(c["devices"]) for c in self.chunks))
+
+    def _chunk_losses(self, b: dict) -> tuple:
+        t = term_summands(self.model, b, self.V, self.mat, self.contacts)
+        if self.mode == "relative":
+            L = loss.relative_losses(t, self.eps)
+        else:
+            L = loss.normalized_losses({k: residuals.residual(v) for k, v in t.items()}, self.sigma2)
+        return L, {k: int(residuals.residual(v).numel()) for k, v in t.items()}
 
     def losses(self) -> dict:
-        return loss.normalized_losses(residual_terms(self.model, self.batch, self.V, self.mat, self.contacts),
-                                      self.sigma2)
+        if len(self.chunks) == 1:
+            return self._chunk_losses(self.chunks[0])[0]
+        acc, cnt = {}, {}
+        for b in self.chunks:
+            L, n = self._chunk_losses(b)
+            for k in L:
+                acc[k] = acc.get(k, 0.0) + L[k] * n[k]
+                cnt[k] = cnt.get(k, 0) + n[k]
+        return {k: acc[k] / cnt[k] for k in acc}
 
     def total(self, lam: dict):
         return loss.total_loss(self.losses(), lam)
@@ -341,10 +399,11 @@ def train(spec: UnitSpec, prep: Prepared, cfg: Config, eval_val: bool = False, l
     t0, dev = time.time(), device()
     model = ansatz_mod.Ansatz(build_network(spec, cfg, prep).to(dev), prep.bounds)
     params = list(model.parameters())
-    sigma2 = dict(prep.sigma2) if spec.loss == "normalized" else {k: 1.0 for k in prep.sigma2}
+    sigma2 = {k: 1.0 for k in prep.sigma2} if spec.loss == "unnormalized" else dict(prep.sigma2)
     lbfgs = LBFGS(memory=cfg.lbfgs_memory)
     on_update = [lbfgs.reset] if (spec.weighting == "gradient" and spec.reset_memory) else []
-    bw = weights.BlockWeights(alpha=cfg.alpha_lambda, on_update=on_update)
+    bw = weights.BlockWeights(alpha=cfg.alpha_lambda, on_update=on_update, reference=cfg.lambda_reference,
+                              eps_g=cfg.eps_g, lam_min=cfg.lambda_min, lam_max=cfg.lambda_max)
     if lam_fixed is not None:
         bw.values = {"poisson": 1.0, **{k: float(v) for k, v in lam_fixed.items()}}
     soaps = [SOAP(lr=cfg.soap_lr, precondition_frequency=cfg.soap_precondition_frequency, warmup=cfg.soap_warmup) for _ in params] \
@@ -359,8 +418,8 @@ def train(spec: UnitSpec, prep: Prepared, cfg: Config, eval_val: bool = False, l
 
     for j in range(K):
         V_tilde = j * cfg.voltage_step / prep.scales.V_th
-        obj = Objective(model, make_batch(prep.train, j, spec.seed, cfg, dev), V_tilde, sigma2, prep.material,
-                        prep.contacts)
+        obj = Objective(model, make_batches(prep.train, j, spec.seed, cfg, dev), V_tilde, sigma2, prep.material,
+                        prep.contacts, mode=spec.loss)
         lbfgs.reset()                                   # the objective changed: the voltage moved
 
         def fun(x):
@@ -439,7 +498,7 @@ def train(spec: UnitSpec, prep: Prepared, cfg: Config, eval_val: bool = False, l
                 except ValueError as e:                 # Eq. (12) undefined: keep lambda, record it
                     lambda_errors.append({"stage": j, "block": b, "error": str(e)})
             blocks.append(blk)
-        stages.append({"stage": j, "V": j * cfg.voltage_step, "n_devices": int(len(obj.batch["devices"])),
+        stages.append({"stage": j, "V": j * cfg.voltage_step, "n_devices": obj.n_devices,
                        "loss_start": loss_start_stage})
         if diverged:
             stages_done = j                       # the stage that diverged is not a finished stage
@@ -459,7 +518,8 @@ def train(spec: UnitSpec, prep: Prepared, cfg: Config, eval_val: bool = False, l
 
     seconds = time.time() - t0
     result = {"sigma2_used": sigma2, "blocks": blocks, "stages": stages, "stages_done": stages_done,
-              "stages_planned": K, "diverged": diverged, "lambda_final": dict(bw.values),
+              "stages_planned": K, "diverged": diverged, "lambda_final": dict(bw.values), "lambda_max_seen": bw.max_seen, "loss_mode": spec.loss,
+              "full_batch": cfg.full_batch,
               "lambda_update_errors": lambda_errors, "per_device_error": errs(prep.test, J_test),
               "seconds": seconds, "device": str(dev),
               "gpu_hours": seconds / 3600.0 if dev.type == "cuda" else 0.0,

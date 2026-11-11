@@ -1,4 +1,4 @@
-"""The common decision rule of the protocol (experiments v02), applied to per-device PCE errors.
+"""The common decision rule of the protocol (experiments v03), applied to per-device PCE errors.
 
 For each arm and test device the relative PCE error is averaged over the 5 seeds (`seed_average`);
 two arms are compared with a paired two-sided Wilcoxon over the test devices; Holm is applied to the
@@ -13,7 +13,7 @@ import numpy as np
 from scipy import stats as sps
 
 __provenance__ = {
-    "revision": "experiments-protocolo-experimental-de-la-pinn-por-etapas-sobre-dpv-v02.md",
+    "revision": "experiments-protocolo-experimental-de-la-pinn-por-etapas-sobre-dpv-v03.md",
     "sections": ["E1", "E2", "E3", "E4", "E5"],
     "experiments": ["E1", "E2", "E3", "E4", "E5"],
     "invariants": [

@@ -1,4 +1,4 @@
-"""Per-term normalized loss (Eqs. 10-11) and its measurement on the dPV reference.
+"""Per-node relative residual loss (Eqs. 10-11 of r04), the global sigma_i^2 of r03 kept as its floor, and their measurement on the dPV reference.
 
 `ReferenceStatistics` accumulates, over the training devices, all voltages and
 all nodes, the two quantities of Eq. (10): sigma_i^2 = <(sum_q |T_iq|)^2> and
@@ -17,7 +17,7 @@ from .residuals import residual, scale
 from .scaling import Scales
 
 __provenance__ = {
-    "revision": "research-concept-entrenamiento-por-etapas-de-una-pinn-no-lineal-para-el-model-r03.md",
+    "revision": "research-concept-entrenamiento-por-etapas-de-una-pinn-no-lineal-para-el-model-r04.md",
     "sections": ["4"],
     "equations": ["10", "11"],
     "invariants": [
@@ -31,6 +31,9 @@ __provenance__ = {
         "reference_sigma_squared_reproduces_the_proposals_table",
         "sigma_squared_elementary_terms_fixed",
         "reference_floor_below_unity_with_stated_operator",
+        "relative_residual_is_bounded_by_one",
+        "relative_loss_floor_is_the_root_of_sigma_squared",
+        "relative_loss_weighs_dark_and_bright_nodes_alike",
     ],
 }
 
@@ -148,8 +151,26 @@ def measure_reference_statistics(refs, scales: Scales | None = None, progress=No
     return stats
 
 
+def residual_floor(sigma2: dict) -> dict:
+    """Eq. (10) of r04: eps_i = sigma_i, the root of the global scale of r03's table."""
+    return {k: float(np.sqrt(v)) for k, v in sigma2.items()}
+
+
+def relative_losses(terms: dict, eps: dict) -> dict:
+    """Eqs. (10)-(11) of r04: R_hat_i = R_i / (sum_q |T_iq| + eps_i), L_i = <R_hat_i^2>.
+
+    `terms` maps each residual name to its tuple of summands T_iq (numpy arrays or torch tensors)."""
+    out = {}
+    for name, t in terms.items():
+        r = residual(t) / (scale(t) + eps[name])
+        out[name] = (r ** 2).mean()
+        if not hasattr(out[name], "backward"):
+            out[name] = float(out[name])
+    return out
+
+
 def normalized_losses(res: dict, sigma2: dict) -> dict:
-    """Eq. (11): L_i = <R_i^2> / sigma_i^2 (numpy arrays or torch tensors)."""
+    """Eq. (11) of r03 (the global-scale control arm of E1): L_i = <R_i^2> / sigma_i^2."""
     out = {}
     for name, r in res.items():
         out[name] = (r ** 2).mean() / sigma2[name]

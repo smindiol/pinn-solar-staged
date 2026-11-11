@@ -6,7 +6,7 @@
         "matched": [
           "\\mathcal{R}_i = \\sum_q T_{iq}"
         ],
-        "revision": "research-concept-entrenamiento-por-etapas-de-una-pinn-no-lineal-para-el-model-r03.md"
+        "revision": "research-concept-entrenamiento-por-etapas-de-una-pinn-no-lineal-para-el-model-r04.md"
       },
       "adoption": {
         "matched": [
@@ -29,7 +29,7 @@
         "matched": [
           "operador discreto"
         ],
-        "revision": "research-concept-entrenamiento-por-etapas-de-una-pinn-no-lineal-para-el-model-r03.md"
+        "revision": "research-concept-entrenamiento-por-etapas-de-una-pinn-no-lineal-para-el-model-r04.md"
       },
       "adoption": {
         "matched": [
@@ -47,6 +47,6 @@
       "reasons": []
     }
   },
-  "revision": "research-concept-entrenamiento-por-etapas-de-una-pinn-no-lineal-para-el-model-r03.md",
+  "revision": "research-concept-entrenamiento-por-etapas-de-una-pinn-no-lineal-para-el-model-r04.md",
   "revisionSha256": "a7a36bd5558de7d8d6d5e6fbfa64b978d367219acaf41cfac32608cee0c253a5"
 }

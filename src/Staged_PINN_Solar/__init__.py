@@ -15,8 +15,8 @@ __implementation__ = {
     # document label instead, so each skill reads its own lineage:
     #     "revision": {"proposal": "<filename>", "<label>": "<filename>"},
     "revision": {
-        "proposal": "research-concept-entrenamiento-por-etapas-de-una-pinn-no-lineal-para-el-model-r03.md",
-        "experiments": "experiments-protocolo-experimental-de-la-pinn-por-etapas-sobre-dpv-v02.md",
+        "proposal": "research-concept-entrenamiento-por-etapas-de-una-pinn-no-lineal-para-el-model-r04.md",
+        "experiments": "experiments-protocolo-experimental-de-la-pinn-por-etapas-sobre-dpv-v03.md",
     },
 
     # What kind of prediction the protocol assumes, over which unit,

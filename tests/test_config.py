@@ -11,9 +11,9 @@ from Staged_PINN_Solar import config as C
 
 SRC = Path(C.__file__)
 
-#: what the experiments protocol (v02) or r10 fixes; every other field is open and must say PROVISIONAL.
+#: what the experiments protocol (v03) or r10 fixes; every other field is open and must say PROVISIONAL.
 FIXED = {"seeds", "split_seed", "bootstrap_resamples", "confidence_level", "holm_alpha", "width", "depth",
-         "activation", "voltage_step", "max_voltages"}
+         "activation", "voltage_step", "max_voltages", "eps_g", "lambda_min", "lambda_max", "lambda_reference"}
 #: rehearsal-scale switches, not parameters of the experiment
 REHEARSAL = {"max_devices", "max_stages", "smoke"}
 

@@ -2,7 +2,7 @@
 
 Each field is tagged in its comment:
 
-* ``FIXED`` -- stated by the experiments protocol (v02) or by r03/r10; changing it changes the experiment.
+* ``FIXED`` -- stated by the experiments protocol (v03) or by r04/r10; changing it changes the experiment.
 * ``PROVISIONAL`` -- the protocol and r03 leave it open; the value is a provisional default taken from the
   source named in the comment (previous TDG code, a library default, or r10) and is awaiting the
   operator's decision. The record of every unit carries the whole configuration (`Config.to_dict`).
@@ -13,7 +13,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field, replace
 
 __provenance__ = {
-    "revision": "experiments-protocolo-experimental-de-la-pinn-por-etapas-sobre-dpv-v02.md",
+    "revision": "experiments-protocolo-experimental-de-la-pinn-por-etapas-sobre-dpv-v03.md",
     "sections": ["E1", "E2", "E3", "E4", "E5"],
     "experiments": ["E1", "E2", "E3", "E4", "E5"],
     "invariants": [
@@ -25,7 +25,7 @@ __provenance__ = {
 
 @dataclass(frozen=True)
 class Config:
-    # --- fixed by the protocol (parameters table of experiments v02) -----------------------------
+    # --- fixed by the protocol (parameters table of experiments v03) -----------------------------
     seeds: tuple = (0, 1, 2, 3, 4)                 # FIXED: training seeds
     split_seed: int = 42                           # FIXED: device split seed (80/10/10)
     bootstrap_resamples: int = 10000               # FIXED
@@ -42,6 +42,12 @@ class Config:
     iters_per_block: int = 100                     # PROVISIONAL: iterations per block; previous TDG TrainConfig.gummel_block = 100
     n_devices_per_batch: int = 64                  # PROVISIONAL: previous TDG TrainConfig.data_batch = 64
     n_nodes_per_device: int = 32                   # PROVISIONAL: 64 devices x 32 nodes ~ previous TDG n_q = 2000 interior points
+    eps_g: float = 1e-8                            # FIXED by protocol v03: gradient floor of Eq. 12 (r04)
+    lambda_min: float = 1e-2                       # FIXED by protocol v03: lower clip of Eq. 12 (r04)
+    lambda_max: float = 1e4                        # FIXED by protocol v03: upper clip of Eq. 12 (r04)
+    lambda_reference: str = "max"                  # FIXED by r04 Eq. 12: the largest-gradient term is the reference ("poisson" = r03 control)
+    full_batch: bool = False                       # PROVISIONAL: r04 Section 6 regime: every eligible device and every interior node per iteration (A100 80 GB); False samples per block (T4)
+    train_chunk_devices: int = 128                 # PROVISIONAL: devices per autograd chunk under full_batch (memory only; the gradient is the exact full-batch gradient)
     alpha_lambda: float = 0.1                      # PROVISIONAL: weights.BlockWeights default (wang2020 anneals with 0.9)
     lbfgs_memory: int = 10                         # PROVISIONAL: optimizers.LBFGS default
     soap_lr: float = 1e-4                          # PROVISIONAL: measured from the equilibrium start (Adam proxy, 256x4, 200 its): 1e-4 with warmup reaches 0.35 from 0.43; 3e-3 down to 3e-5 without warmup diverge

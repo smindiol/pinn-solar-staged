@@ -7,9 +7,9 @@ import pytest
 from Staged_PINN_Solar import units as U
 
 
-def test_unit_counts_are_20_40_10_20() -> None:
-    """Protocol costs: E1 20 runs, E2 40, E5 10 new, E4 20 (2 optimizers x 2 archs x 5 seeds)."""
-    assert [len(U.enumerate_units(s)) for s in ("e1", "e2", "e5", "e4")] == [20, 40, 10, 20]
+def test_unit_counts_are_30_40_10_20() -> None:
+    """Protocol v03 costs: E1 30 runs (3 losses), E2 40, E5 10 new, E4 20 (2 optimizers x 2 archs x 5 seeds)."""
+    assert [len(U.enumerate_units(s)) for s in ("e1", "e2", "e5", "e4")] == [30, 40, 10, 20]
     assert len(U.enumerate_units("pce_check")) == len(U.enumerate_units("reference")) == 1
     assert len(U.enumerate_units("analysis")) == 1
 
@@ -22,17 +22,19 @@ def test_unit_ids_are_unique_parseable_and_filesystem_safe() -> None:
             seen.add(uid)
             spec = U.parse_unit(uid)
             assert spec.step == step and U.unit_id(spec) == uid
-    assert len(seen) == 90
+    assert len(seen) == 100
 
 
 def test_arms_follow_the_protocol() -> None:
     e1 = {U.parse_unit(u) for u in U.enumerate_units("e1")}
     assert {(s.arch, s.loss, s.optimizer, s.weighting) for s in e1} == {
-        (a, l, "lbfgs", "fixed") for a in "AB" for l in ("normalized", "unnormalized")}
+        (a, l, "lbfgs", "fixed") for a in "AB" for l in ("unnormalized", "normalized", "relative")}
     e2 = {U.parse_unit(u) for u in U.enumerate_units("e2")}
     assert {(s.weighting, s.optimizer, s.arch) for s in e2} == {
         (w, o, a) for w in ("fixed", "gradient") for o in ("lbfgs", "soap") for a in "AB"}
-    assert all(s.reset_memory and s.loss == "normalized" for s in e2)
+    assert all(s.reset_memory and s.loss == "relative" for s in e2)
+    e5 = {U.parse_unit(u) for u in U.enumerate_units("e5")}
+    assert all(s.loss == "relative" for s in e5)
     e5 = {U.parse_unit(u) for u in U.enumerate_units("e5")}
     assert all(s.optimizer == "lbfgs" and s.weighting == "gradient" and not s.reset_memory for s in e5)
     e4 = {U.parse_unit(u) for u in U.enumerate_units("e4")}
@@ -62,7 +64,7 @@ def test_shard_token_expands_to_its_round_robin_slice() -> None:
     got = [steps._requested("e1", [f"shard-{k}-of-3"], C.Config(), False) for k in range(3)]
     assert got == U.shard(every, 3)
     assert sorted(sum(got, [])) == sorted(every)
-    mixed = steps._requested("e1", ["shard-0-of-20", every[5]], C.Config(), False)
+    mixed = steps._requested("e1", ["shard-0-of-30", every[5]], C.Config(), False)
     assert mixed == [every[0], every[5]]
     for bad in ("shard-3-of-3", "shard-0-of-0", "shard-x-of-2"):
         with pytest.raises(ValueError):

@@ -126,3 +126,36 @@ def test_reference_floor_below_unity_with_stated_operator() -> None:
     worst = max(measure(i)["expanded"][t]["f"] / measure(i)["expanded"][t]["sigma2"]
                 for i in range(SWEEP_SIZE) for t in TERMS)
     assert worst < 1e-3
+
+
+def test_relative_residual_is_bounded_by_one() -> None:
+    """Eq. (10) of r04: |R_hat_i| < 1 at every node, whatever the magnitude of the summands."""
+    from Staged_PINN_Solar import loss as L
+    rng = np.random.default_rng(0)
+    big = (rng.standard_normal((4, 50)) * 1e-7, rng.standard_normal((4, 50)) * 1e-9)
+    tiny = (rng.standard_normal((4, 50)) * 1e-22, rng.standard_normal((4, 50)) * 1e-22)
+    eps = {"n": 1e-11, "p": 1e-11}
+    for name, t in (("n", big), ("p", tiny)):
+        r = L.residual(t) / (L.scale(t) + eps[name])
+        assert np.all(np.abs(r) < 1.0)
+    out = L.relative_losses({"n": big, "p": tiny}, eps)
+    assert 0.0 <= out["n"] < 1.0 and 0.0 <= out["p"] < 1.0
+
+
+def test_relative_loss_floor_is_the_root_of_sigma_squared() -> None:
+    from Staged_PINN_Solar import loss as L
+    assert L.residual_floor({"n": 1.70e-22, "poisson": 2.52e-3}) == pytest.approx({"n": np.sqrt(1.70e-22), "poisson": np.sqrt(2.52e-3)})
+
+
+def test_relative_loss_weighs_dark_and_bright_nodes_alike() -> None:
+    """The defect of r03 measured in the first wave: a global sigma^2 lets the bright nodes (summands ~1e-7)
+    swamp the dark ones (~1e-22). The same relative error at both kinds of node gives the same relative loss;
+    the global normalization gives losses 1e30 apart."""
+    from Staged_PINN_Solar import loss as L
+    bright = (np.full((1, 10), 1e-7), np.full((1, 10), -1e-7 * 0.9))      # 10 % relative error
+    dark = (np.full((1, 10), 1e-22), np.full((1, 10), -1e-22 * 0.9))
+    eps = {"b": 1e-30, "d": 1e-30}
+    rel = L.relative_losses({"b": bright, "d": dark}, eps)
+    assert rel["b"] == pytest.approx(rel["d"], rel=1e-6)
+    glob = L.normalized_losses({"b": L.residual(bright), "d": L.residual(dark)}, {"b": 1.7e-22, "d": 1.7e-22})
+    assert glob["b"] / glob["d"] > 1e29

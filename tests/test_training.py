@@ -191,3 +191,57 @@ def test_equilibrium_start_keeps_every_initial_normalized_term_bounded(prep) -> 
         assert all(np.isfinite(v) and v < 10.0 for v in eq.values()), eq
     rnd = initial("e1-A-normalized-s0", CFG.with_(start="random"))
     assert max(rnd.values()) > 1e6 * max(eq.values())
+
+
+@needs_dataset
+def test_relative_arm_uses_the_per_node_residual(prep) -> None:
+    """E1's r04 arm: the objective's L_i is Eq. (11) of r04 on the batch, with eps_i = sqrt(sigma_i^2)."""
+    from Staged_PINN_Solar import ansatz as ansatz_mod
+    dev = torch.device("cpu")
+    batch = training.make_batch(prep.train, 0, 0, CFG, dev)
+    model = ansatz_mod.Ansatz(training.build_network(_spec("e1-A-relative-s0"), CFG, prep), prep.bounds)
+    obj = training.Objective(model, batch, 0.0, prep.sigma2, prep.material, prep.contacts, mode="relative")
+    got = {k: float(v) for k, v in obj.losses().items()}
+    t = training.term_summands(model, batch, 0.0, prep.material, prep.contacts)
+    want = {k: float(v) for k, v in loss.relative_losses(t, loss.residual_floor(prep.sigma2)).items()}
+    assert got == pytest.approx(want)
+    assert all(0.0 <= v < 1.0 for v in got.values()), got
+    r = training.train(_spec("e1-A-relative-s0"), prep, CFG)
+    assert r["loss_mode"] == "relative" and r["sigma2_used"] == pytest.approx(prep.sigma2)
+
+
+@needs_dataset
+def test_full_batch_chunks_give_the_same_loss_and_gradient_as_one_batch(prep) -> None:
+    """r04 Section 6: under `full_batch` every eligible device and interior node enters, and chunking
+    (memory only) changes neither the loss nor its gradient."""
+    from Staged_PINN_Solar import ansatz as ansatz_mod
+    dev = torch.device("cpu")
+    one = CFG.with_(full_batch=True, train_chunk_devices=10 ** 6)
+    many = CFG.with_(full_batch=True, train_chunk_devices=3)
+    b1, bm = training.make_batches(prep.train, 0, 0, one, dev), training.make_batches(prep.train, 0, 0, many, dev)
+    assert len(b1) == 1 and len(bm) > 1
+    n_eligible = int((prep.train.n_V > 0).sum())
+    assert sum(len(c["devices"]) for c in bm) == n_eligible
+    assert b1[0]["x"].shape[0] == n_eligible * (prep.train.x_hat.shape[1] - 2)
+    model = ansatz_mod.Ansatz(training.build_network(_spec("e2-A-lbfgs-fixed-s0"), CFG, prep), prep.bounds)
+    params = list(model.parameters())
+    lam = {k: 1.0 for k in prep.sigma2}
+    outs = []
+    for b in (b1, bm):
+        obj = training.Objective(model, b, 0.0, prep.sigma2, prep.material, prep.contacts, mode="relative")
+        assert obj.n_devices == n_eligible
+        total = obj.total(lam)
+        g = torch.cat([x.reshape(-1) for x in torch.autograd.grad(total, params)])
+        outs.append((float(total), g.detach().numpy()))
+    assert outs[0][0] == pytest.approx(outs[1][0], rel=1e-12)
+    np.testing.assert_allclose(outs[0][1], outs[1][1], rtol=1e-10, atol=1e-14)
+
+
+@needs_dataset
+def test_gradient_weights_never_exceed_lambda_max(prep) -> None:
+    """Eq. (12) of r04 in the loop: the largest lambda ever used stays within [lambda_min, lambda_max]."""
+    cfg = CFG.with_(lambda_max=50.0)
+    r = training.train(_spec("e2-A-lbfgs-gradient-s0"), prep, cfg)
+    assert r["lambda_max_seen"] <= 50.0
+    assert all(cfg.lambda_min <= v <= 50.0 for b in r["blocks"] for v in b["lambda"].values())
+    assert r["lambda_update_errors"] == []

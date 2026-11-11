@@ -1,8 +1,10 @@
-"""Loss-weight optimization (Eqs. 12-13) and the outer-loop alternative hook (section 5).
+"""Loss-weight optimization (Eqs. 12-13 of r04) and the outer-loop alternative hook (section 5).
 
-The weights follow the learning-rate annealing of wang2020: Poisson is the
-reference term, every other weight chases max|grad L_Poisson| / mean|grad L_i|
-through an exponential moving average. A quasi-Newton method needs a fixed
+The weights follow the learning-rate annealing of wang2020 in its original form: the
+reference is the term of largest gradient at the iteration, every weight chases
+max_j max|grad L_j| / (mean|grad L_i| + eps_g), clipped to [lambda_min, lambda_max],
+through an exponential moving average. The r03 form (Poisson as a fixed reference, no
+floor, no cap) is kept under `reference="poisson"` as the measured control. A quasi-Newton method needs a fixed
 objective while it accumulates memory, so `BlockWeights` lets lambda change
 only between blocks of iterations and tells registered optimizers to reset.
 
@@ -19,7 +21,7 @@ import numpy as np
 import torch
 
 __provenance__ = {
-    "revision": "research-concept-entrenamiento-por-etapas-de-una-pinn-no-lineal-para-el-model-r03.md",
+    "revision": "research-concept-entrenamiento-por-etapas-de-una-pinn-no-lineal-para-el-model-r04.md",
     "sections": ["5"],
     "equations": ["12", "13"],
     "invariants": [
@@ -32,6 +34,8 @@ __provenance__ = {
         "vanishing_term_gradient_is_refused",
         "bayesian_outer_loop_hook_returns_the_best_proposal",
         "term_gradients_match_autograd",
+        "max_reference_weights_are_clipped_and_floored",
+        "satisfied_term_gets_at_most_lambda_max",
     ],
 }
 
@@ -48,17 +52,27 @@ def term_gradients(losses: dict, params: Iterable[torch.Tensor]) -> dict:
     return out
 
 
-def lambda_hat(grads: dict, reference: str = "poisson") -> dict:
-    """Eq. (12): max|grad L_ref| / mean|grad L_i| for every i != reference."""
-    top = float(np.max(np.abs(grads[reference])))
+def lambda_hat(grads: dict, reference: str = "max", eps_g: float = 0.0,
+               lam_min: float | None = None, lam_max: float | None = None) -> dict:
+    """Eq. (12). `reference="max"` (r04): clip(max_j max|grad L_j| / (mean|grad L_i| + eps_g), lam_min, lam_max)
+    for EVERY i. `reference=<term>` (r03 control): max|grad L_ref| / mean|grad L_i| for every i != ref."""
+    if reference == "max":
+        top = max(float(np.max(np.abs(g))) for g in grads.values())
+        names = list(grads)
+    else:
+        top = float(np.max(np.abs(grads[reference])))
+        names = [k for k in grads if k != reference]
     out = {}
-    for name, g in grads.items():
-        if name == reference:
-            continue
-        mean = float(np.mean(np.abs(g)))
+    for name in names:
+        mean = float(np.mean(np.abs(grads[name]))) + eps_g
         if mean == 0.0:
             raise ValueError(f"Eq. (12) is undefined for {name!r}: its mean gradient magnitude is zero")
-        out[name] = top / mean
+        v = top / mean
+        if lam_min is not None:
+            v = max(v, lam_min)
+        if lam_max is not None:
+            v = min(v, lam_max)
+        out[name] = v
     return out
 
 
@@ -68,13 +82,17 @@ def ema_update(lam: dict, lam_hat: dict, alpha: float) -> dict:
 
 
 class BlockWeights:
-    """lambda that changes only at block boundaries; Poisson stays at 1."""
+    """lambda that changes only at block boundaries. With `reference="max"` (r04) every term is
+    weighted, floored and capped; with `reference="poisson"` (r03 control) Poisson stays at 1."""
 
     def __init__(self, names=("poisson", "bcn", "bcp", "n", "p"), alpha: float = 0.1,
-                 reference: str = "poisson", on_update: Iterable[Callable[[], None]] = ()) -> None:
+                 reference: str = "max", on_update: Iterable[Callable[[], None]] = (),
+                 eps_g: float = 1e-8, lam_min: float = 1e-2, lam_max: float = 1e4) -> None:
         self.reference = reference
         self.alpha = alpha
+        self.eps_g, self.lam_min, self.lam_max = eps_g, lam_min, lam_max
         self.values = {k: 1.0 for k in names}
+        self.max_seen = 1.0
         self.generation = 0
         self._in_block = False
         self._callbacks = list(on_update)
@@ -88,6 +106,14 @@ class BlockWeights:
 
     def end_block(self, grads: dict) -> dict:
         self._in_block = False
+        if self.reference == "max":
+            lh = lambda_hat(grads, "max", self.eps_g, self.lam_min, self.lam_max)
+            self.values = ema_update(self.values, {**self.values, **lh}, self.alpha)
+            self.max_seen = max(self.max_seen, max(self.values.values()))
+            self.generation += 1
+            for cb in self._callbacks:
+                cb()
+            return dict(self.values)
         # A term with zero gradient is exactly satisfied (the contacts at the equilibrium start): Eq. (12)
         # is undefined for it, so its lambda is kept; every other term updates by Eqs. (12)-(13).
         live = {k: g for k, g in grads.items()

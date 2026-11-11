@@ -26,7 +26,7 @@ from . import data, loss, pce, stats, training, units, weights
 from .config import Config, smoke as smoke_config
 
 __provenance__ = {
-    "revision": "experiments-protocolo-experimental-de-la-pinn-por-etapas-sobre-dpv-v02.md",
+    "revision": "experiments-protocolo-experimental-de-la-pinn-por-etapas-sobre-dpv-v03.md",
     "sections": ["E1", "E2", "E3", "E4", "E5"],
     "experiments": ["E1", "E2", "E3", "E4", "E5"],
     "invariants": [
@@ -248,7 +248,7 @@ def _run_training_step(step: str, units_arg, smoke, config, root=None, out=None,
 
 
 def run_e1(units=None, smoke=None, config=None, root=None, out=None):
-    """E1: 2 architectures x 2 losses (normalized vs unnormalized) x 5 seeds, L-BFGS, with conditioning diagnostics. 20 units."""
+    """E1: 2 architectures x 3 losses (unnormalized, global sigma_i^2, per-node relative) x 5 seeds, L-BFGS, with conditioning diagnostics. 30 units."""
     return _run_training_step("e1", units, smoke, config, root, out)
 
 
@@ -386,7 +386,9 @@ def analyse(smoke: bool = False, root=None, config=None) -> dict:
     else:
         g = _group(e1, lambda s: (s["loss"], s["arch"]))
         arms = {k: _arm(v) for k, v in g.items()}
-        cmp = fam({a: (arms[("normalized", a)], arms[("unnormalized", a)]) for a in "AB"})
+        # v03: the relative arm (A) against each control (B), Holm over the 4 comparisons of the experiment
+        cmp = fam({f"{a}|vs_{ctl}": (arms[("relative", a)], arms[(ctl, a)]) for a in "AB"
+                   for ctl in ("normalized", "unnormalized")})
         rows = {}
         for (l, a), arm in arms.items():
             recs = g[(l, a)]
@@ -394,18 +396,18 @@ def analyse(smoke: bool = False, root=None, config=None) -> dict:
                                 "early_max_gradient_share": _diag_median(recs, "early_max_gradient_share"),
                                 "log10_norm_ratio_init": _diag_median(recs, "log10_norm_ratio_init"),
                                 "curvature_ratio_init": _diag_median(recs, "curvature_ratio_init")}
-        for a in "AB":
-            n, u = rows[f"normalized|{a}"], rows[f"unnormalized|{a}"]
-            c = cmp[a]
-            c["fewer_divergent_runs_for_normalized"] = bool(n["divergent_runs"] < u["divergent_runs"])
-            c["normalized_better"] = bool(c["winner"] == "A" and c["fewer_divergent_runs_for_normalized"])
+        for key, c in cmp.items():
+            a, ctl = key.split("|vs_")
+            r, u = rows[f"relative|{a}"], rows[f"{ctl}|{a}"]
+            c["no_more_divergent_runs_for_relative"] = bool(r["divergent_runs"] <= u["divergent_runs"])
+            c["relative_better"] = bool(c["winner"] == "A" and c["no_more_divergent_runs_for_relative"])
+            c["causal_share_below_0_9"] = bool(r["early_max_gradient_share"] < 0.9)
             c["causal_lower_diagnostics_at_init"] = bool(
-                n["log10_norm_ratio_init"] < u["log10_norm_ratio_init"]
-                and n["curvature_ratio_init"] < u["curvature_ratio_init"])
+                c["causal_share_below_0_9"] and r["early_max_gradient_share"] < u["early_max_gradient_share"])
             c["causal_part_note"] = ("medians over seeds of per-run diagnostics; the device-level rule cannot be applied "
                                      "to 5 values (smallest exact two-sided Wilcoxon p = 0.0625)")
         out["experiments"]["E1"] = {"status": "complete", "arms": rows, "comparisons": cmp,
-                                    "family": "normalized (A) vs unnormalized (B), Holm over 2 architectures"}
+                                    "family": "relative (A) vs each control (B), Holm over 2 architectures x 2 controls"}
 
     # E2 / E3 / E4 / E5 -----------------------------------------------------------------------------------
     e2, miss2 = need("e2")
@@ -477,13 +479,13 @@ def report_markdown(res: dict) -> str:
     else:
         L += ["| Arm | Arch | Median rel. PCE error (%) | 95% CI | Divergent runs | Max grad share | log10 norm ratio | lambda_max / mean trace |",
               "|---|---|---|---|---|---|---|---|"]
-        for l, name in (("unnormalized", "Unnormalized"), ("normalized", "Normalized")):
+        for l, name in (("unnormalized", "Unnormalized"), ("normalized", "Global sigma^2"), ("relative", "Relative")):
             for a in "AB":
                 r = e["arms"][f"{l}|{a}"]
                 L.append(f"| {name} | {a} | {_fmt(r['median'])} | {ci(r)} | {r['divergent_runs']}/{r['n_runs']} | "
                          f"{_fmt(r['early_max_gradient_share'])} | {_fmt(r['log10_norm_ratio_init'])} | {_fmt(r['curvature_ratio_init'])} |")
         L += [""] + [f"- {a}: p_Holm={_fmt(c['p_holm'])}, CI diff={[_fmt(x) for x in c['ci']]}, winner={c['winner']}, "
-                     f"normalized_better={c['normalized_better']}, causal_lower_diagnostics={c['causal_lower_diagnostics_at_init']}"
+                     f"relative_better={c['relative_better']}, causal_lower_diagnostics={c['causal_lower_diagnostics_at_init']}"
                      for a, c in e["comparisons"].items()] + [""]
     e = ex.get("E2", {})
     L += ["## E2", ""]
