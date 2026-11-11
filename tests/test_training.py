@@ -245,3 +245,27 @@ def test_gradient_weights_never_exceed_lambda_max(prep) -> None:
     assert r["lambda_max_seen"] <= 50.0
     assert all(cfg.lambda_min <= v <= 50.0 for b in r["blocks"] for v in b["lambda"].values())
     assert r["lambda_update_errors"] == []
+
+
+@needs_dataset
+def test_chunked_value_and_grad_equals_the_one_graph_gradient(prep) -> None:
+    """Gradient accumulation frees each chunk's graph after its backward; the value, the total gradient and
+    every per-term gradient must equal those of one graph over the whole full batch."""
+    from Staged_PINN_Solar import ansatz as ansatz_mod
+    dev = torch.device("cpu")
+    chunks = training.make_batches(prep.train, 0, 0, CFG.with_(full_batch=True, train_chunk_devices=3), dev)
+    assert len(chunks) > 1
+    model = ansatz_mod.Ansatz(training.build_network(_spec("e2-A-lbfgs-gradient-s0"), CFG, prep), prep.bounds)
+    params = list(model.parameters())
+    lam = {"poisson": 2.0, "n": 0.5, "p": 3.0, "bcn": 1.0, "bcp": 7.0}
+    obj = training.Objective(model, chunks, 0.0, prep.sigma2, prep.material, prep.contacts, mode="relative")
+    total = obj.total(lam)
+    want = torch.cat([g.reshape(-1) for g in torch.autograd.grad(total, params)]).detach().numpy()
+    v, g = obj.value_and_grad(lam, params)
+    assert float(v) == pytest.approx(float(total), rel=1e-12)
+    np.testing.assert_allclose(torch.cat([x.reshape(-1) for x in g]).numpy(), want, rtol=1e-10, atol=1e-14)
+    from Staged_PINN_Solar import weights as W
+    per_term_want = W.term_gradients(obj.losses(), params)
+    per_term = obj.term_grads(params)
+    for k in per_term_want:
+        np.testing.assert_allclose(per_term[k], per_term_want[k], rtol=1e-10, atol=1e-14)

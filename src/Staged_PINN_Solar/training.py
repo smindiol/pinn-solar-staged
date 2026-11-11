@@ -49,6 +49,7 @@ __provenance__ = {
         "relative_arm_uses_the_per_node_residual",
         "full_batch_chunks_give_the_same_loss_and_gradient_as_one_batch",
         "gradient_weights_never_exceed_lambda_max",
+        "chunked_value_and_grad_equals_the_one_graph_gradient",
         "training_step_decreases_loss_on_tiny_problem",
         "soap_runs_per_parameter_and_decreases_loss",
         "lambda_changes_only_between_blocks",
@@ -307,7 +308,18 @@ class Objective:
             L = loss.normalized_losses({k: residuals.residual(v) for k, v in t.items()}, self.sigma2)
         return L, {k: int(residuals.residual(v).numel()) for k, v in t.items()}
 
+    def _counts(self) -> list:
+        """Residual sizes per chunk without building a graph: domain terms live at the chunk's nodes,
+        contact terms at two contacts per device."""
+        out = []
+        for b in self.chunks:
+            nodes, contacts = int(b["x"].shape[0]), 2 * int(len(b["devices"]))
+            out.append({"poisson": nodes, "n": nodes, "p": nodes, "bcn": contacts, "bcp": contacts})
+        return out
+
     def losses(self) -> dict:
+        """Every L_i with its graph. Over several chunks this keeps every chunk's graph alive at once, so
+        under the full batch use `value_and_grad` / `term_grads`, which free each chunk after its backward."""
         if len(self.chunks) == 1:
             return self._chunk_losses(self.chunks[0])[0]
         acc, cnt = {}, {}
@@ -317,6 +329,43 @@ class Objective:
                 acc[k] = acc.get(k, 0.0) + L[k] * n[k]
                 cnt[k] = cnt.get(k, 0) + n[k]
         return {k: acc[k] / cnt[k] for k in acc}
+
+    def value_and_grad(self, lam: dict, params: list) -> tuple:
+        """sum_i lambda_i L_i and its exact gradient, accumulated chunk by chunk: each chunk's graph is
+        built, differentiated and released before the next, so peak memory is that of ONE chunk."""
+        counts = self._counts()
+        total_n = {k: sum(c[k] for c in counts) for k in counts[0]}
+        value, grad = 0.0, None
+        for b, n in zip(self.chunks, counts):
+            L, _ = self._chunk_losses(b)
+            part = sum(lam[k] * L[k] * (n[k] / total_n[k]) for k in L)
+            g = torch.autograd.grad(part, params)
+            value += float(part.detach())
+            grad = [x.detach() for x in g] if grad is None else [a + x.detach() for a, x in zip(grad, g)]
+            del L, part, g
+        return torch.tensor(value, dtype=torch.float64), grad
+
+    def term_grads(self, params: list) -> dict:
+        """Flat grad_theta L_i per term (numpy), accumulated chunk by chunk like `value_and_grad`."""
+        counts = self._counts()
+        total_n = {k: sum(c[k] for c in counts) for k in counts[0]}
+        out = {}
+        for b, n in zip(self.chunks, counts):
+            L, _ = self._chunk_losses(b)
+            names = list(L)
+            for i, k in enumerate(names):
+                g = torch.autograd.grad(L[k] * (n[k] / total_n[k]), params, retain_graph=i < len(names) - 1,
+                                        allow_unused=True)
+                flat = torch.cat([torch.zeros_like(q).reshape(-1) if x is None else x.reshape(-1)
+                                  for q, x in zip(params, g)]).detach().cpu().numpy()
+                out[k] = flat if k not in out else out[k] + flat
+            del L
+        return out
+
+    def probe(self) -> "Objective":
+        """The same objective restricted to the first chunk: the Hessian diagnostics of E1 (power iteration and
+        Hutchinson need a second-order graph) are measured on it, never on the whole full batch."""
+        return Objective(self.model, self.chunks[0], self.V, self.sigma2, self.mat, self.contacts, mode=self.mode)
 
     def total(self, lam: dict):
         return loss.total_loss(self.losses(), lam)
@@ -384,9 +433,8 @@ def initial_parameters(spec: UnitSpec, cfg: Config, prep: Prepared) -> list:
 
 def _soap_block(params, soaps, objective, lam, iters, history) -> None:
     for _ in range(iters):
-        total = objective.total(lam)
-        history.append(float(total.detach()))
-        grads = torch.autograd.grad(total, params)
+        total, grads = objective.value_and_grad(lam, params)
+        history.append(float(total))
         with torch.no_grad():
             for p, s, g in zip(params, soaps, grads):
                 w = p.detach().reshape(p.shape[0], -1)
@@ -424,13 +472,13 @@ def train(spec: UnitSpec, prep: Prepared, cfg: Config, eval_val: bool = False, l
 
         def fun(x):
             _set(params, x)
-            total = obj.total(bw.values)
-            g = torch.autograd.grad(total, params)
-            return total.detach(), _flat(g).detach()
+            total, g = obj.value_and_grad(bw.values, params)
+            return total.to(x.device), _flat(g).detach()
 
         def diagnose(at: str, it: int, hessian: bool) -> None:
-            losses = obj.losses()
-            grads = weights.term_gradients(losses, params)
+            dobj = obj.probe()                       # Hessian needs a second-order graph: first chunk only
+            losses = dobj.losses()
+            grads = obj.term_grads(params)
             rec = {"stage": j, "at": at, "iteration": it, "lambda": dict(bw.values)}
             sh = diagnostics.gradient_shares(grads, bw.values)
             rec.update(shares=sh, max_share=max(sh.values()),
@@ -492,7 +540,7 @@ def train(spec: UnitSpec, prep: Prepared, cfg: Config, eval_val: bool = False, l
                 diverged = True
                 break
             if spec.weighting == "gradient":
-                grads = weights.term_gradients(obj.losses(), params)
+                grads = obj.term_grads(params)
                 try:
                     bw.end_block(grads)
                 except ValueError as e:                 # Eq. (12) undefined: keep lambda, record it
