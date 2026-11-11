@@ -256,6 +256,8 @@ def _run_on_gpus(step, pending, smoke, cfg, root, out, progress, n_gpu: int) -> 
     of the units, writes the same per-unit files, and is restarted if it dies: complete units are skipped."""
     start = time.time()
     src = str(Path(__file__).resolve().parents[1])
+    if root is None:     # download once here: two workers fetching the same file concurrently corrupt it
+        root = data.ensure_dataset()
 
     def launch(gpu: int, uids: list):
         left = cfg.wall_budget_seconds - (time.time() - start)
