@@ -14,6 +14,9 @@ from __future__ import annotations
 import json
 import os
 import re
+import subprocess
+import sys
+import threading
 import time
 import warnings
 from dataclasses import asdict
@@ -215,10 +218,86 @@ def _run_bayes(spec, prep, cfg, uid, smoke, root, budget: _Budget | None = None)
                    "log10_lambda_range": [lo, hi]}}
 
 
+# --- one worker process per GPU ----------------------------------------------------------------------
+#: Restarts of a GPU worker that died (a CUDA fault is sticky: the process is lost, its finished units are not).
+WORKER_RESTARTS = 2
+
+
+def split_by_cost(pending: list, n: int) -> list:
+    """Deal the units over n workers, the expensive architecture (B) first, so every GPU carries a similar load."""
+    order = sorted(pending, key=lambda u: (units.parse_unit(u).arch != "B", pending.index(u)))
+    return [order[k::n] for k in range(n)]
+
+
+def config_from_dict(d: dict) -> Config:
+    """Inverse of `Config.to_dict` after a JSON round trip (tuples come back as lists)."""
+    return Config(**{k: tuple(v) if isinstance(v, list) else v for k, v in d.items()})
+
+
+def _gpu_count() -> int:
+    if os.environ.get("STAGED_PINN_DEVICE") or os.environ.get("STAGED_PINN_WORKER"):
+        return 1
+    try:
+        import torch
+        return int(torch.cuda.device_count())
+    except Exception:
+        return 0
+
+
+def _worker_main(payload: str) -> None:
+    """Entry of one GPU worker: `python -c "from Staged_PINN_Solar import steps; steps._worker_main(sys.argv[1])"`."""
+    a = json.loads(payload)
+    _run_training_step(a["step"], a["units"], a["smoke"], config_from_dict(a["config"]),
+                       a["root"], Path(a["out"]) if a["out"] else None)
+
+
+def _run_on_gpus(step, pending, smoke, cfg, root, out, progress, n_gpu: int) -> None:
+    """Run `pending` with one process per GPU. Each process owns one device (CUDA_VISIBLE_DEVICES) and one slice
+    of the units, writes the same per-unit files, and is restarted if it dies: complete units are skipped."""
+    start = time.time()
+    src = str(Path(__file__).resolve().parents[1])
+
+    def launch(gpu: int, uids: list):
+        left = cfg.wall_budget_seconds - (time.time() - start)
+        payload = json.dumps({"step": step, "units": uids, "smoke": smoke, "root": str(root) if root else None,
+                              "out": str(out) if out else None,
+                              "config": cfg.with_(wall_budget_seconds=max(left, 0.0)).to_dict()})
+        env = dict(os.environ, CUDA_VISIBLE_DEVICES=str(gpu), STAGED_PINN_WORKER="1",
+                   PYTHONPATH=os.pathsep.join([src] + [p for p in [os.environ.get("PYTHONPATH")] if p]))
+        env.pop("FORGE_RUN_UNITS", None)
+        return subprocess.Popen([sys.executable, "-u", "-c",
+                                 "import sys; from Staged_PINN_Solar import steps; steps._worker_main(sys.argv[1])",
+                                 payload], env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+
+    def supervise(gpu: int, uids: list) -> None:
+        for attempt in range(WORKER_RESTARTS + 1):
+            uids = [u for u in uids if not is_complete(unit_path(step, u, smoke, out))]
+            if not uids:
+                return
+            proc = launch(gpu, uids)
+            for line in proc.stdout:
+                progress(f"[gpu{gpu}] {line.rstrip()}")
+            if proc.wait() == 0:
+                return
+            progress(f"[gpu{gpu}] worker exited with code {proc.returncode} (attempt {attempt + 1}); "
+                     f"{'restarting' if attempt < WORKER_RESTARTS else 'giving up'}")
+
+    threads = [threading.Thread(target=supervise, args=(g, uids)) for g, uids in
+               enumerate(split_by_cost(pending, n_gpu)) if uids]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+
 def _run_training_step(step: str, units_arg, smoke, config, root=None, out=None, progress=print) -> list:
     smoke, cfg, todo = _resolve(step, units_arg, smoke, config)
     done = []
     pending = [u for u in todo if not is_complete(unit_path(step, u, smoke, out))]
+    n_gpu = _gpu_count()
+    if n_gpu >= 2 and len(pending) >= 2:
+        _run_on_gpus(step, pending, smoke, cfg, root, out, progress, n_gpu)
+        return [u for u in todo if is_complete(unit_path(step, u, smoke, out))]
     prep = training.prepare(root, cfg) if pending else None
     budget = _Budget(cfg.wall_budget_seconds)
     for uid in todo:

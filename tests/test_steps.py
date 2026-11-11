@@ -200,3 +200,18 @@ def test_wall_budget_stops_before_a_unit_that_would_not_fit(tmp_path, monkeypatc
     clock["t"] = 0.0
     done = steps._run_training_step("e1", uids, False, cfg, out=tmp_path, progress=lambda *a: None)
     assert done == uids                                         # resumes only the missing one
+
+
+def test_units_are_dealt_over_the_gpus_expensive_architecture_first():
+    pending = ["e1-A-relative-s0", "e1-B-relative-s0", "e1-A-relative-s1", "e1-B-relative-s1", "e1-A-relative-s2"]
+    a, b = steps.split_by_cost(pending, 2)
+    assert sorted(a + b) == sorted(pending) and not set(a) & set(b)
+    assert a[0].split("-")[1] == "B" and b[0].split("-")[1] == "B"
+    assert abs(len(a) - len(b)) <= 1
+
+
+def test_config_survives_the_json_round_trip_to_a_gpu_worker():
+    import json
+    from Staged_PINN_Solar.config import Config
+    cfg = Config().with_(wall_budget_seconds=123.0)
+    assert steps.config_from_dict(json.loads(json.dumps(cfg.to_dict()))) == cfg
