@@ -442,6 +442,11 @@ def _soap_block(params, soaps, objective, lam, iters, history) -> None:
                 p.copy_(s.step(w, g.reshape(w.shape)).reshape(p.shape))
 
 
+def partial_path(checkpoint: Path) -> Path:
+    """`<unit>.partial.json` beside `<unit>.ckpt.pt`: the readable progress of an unfinished unit."""
+    return checkpoint.with_name(checkpoint.name.removesuffix(".ckpt.pt") + ".partial.json")
+
+
 class Interrupted(Exception):
     """The run stopped at a stage boundary because the next stage would not fit in the wall budget.
     Its checkpoint is on disk; `stages_done` says how far it got."""
@@ -610,7 +615,7 @@ def train(spec: UnitSpec, prep: Prepared, cfg: Config, eval_val: bool = False, l
                         "stages_done": stages_done, "seconds": spent + time.time() - t0}, tmp)
             os.replace(tmp, checkpoint)
             import json as _json
-            checkpoint.with_suffix(".partial.json").write_text(_json.dumps(
+            partial_path(checkpoint).write_text(_json.dumps(
                 {"unit": units_mod.unit_id(spec), "complete": False, "stages_done": stages_done, "stages_planned": K,
                  "seconds": spent + time.time() - t0, "progress": progress_log}, indent=1))
         if progress:

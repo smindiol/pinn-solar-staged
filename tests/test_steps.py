@@ -206,8 +206,18 @@ def test_units_are_dealt_over_the_gpus_expensive_architecture_first():
     pending = ["e1-A-relative-s0", "e1-B-relative-s0", "e1-A-relative-s1", "e1-B-relative-s1", "e1-A-relative-s2"]
     a, b = steps.split_by_cost(pending, 2)
     assert sorted(a + b) == sorted(pending) and not set(a) & set(b)
-    assert a[0].split("-")[1] == "B" and b[0].split("-")[1] == "B"
+    assert a[-1].split("-")[1] == "B" and b[-1].split("-")[1] == "B"      # cheap first, expensive last
     assert abs(len(a) - len(b)) <= 1
+    one_b = ["e1-B-relative-s0"] + [f"e1-A-relative-s{k}" for k in range(5)]
+    x, y = steps.split_by_cost(one_b, 2)
+    assert sorted(map(len, (x, y))) == [2, 4]                             # B + A against four A
+
+
+def test_pack_token_names_the_units_and_the_budget_of_one_kernel():
+    every = units.enumerate_units("e1", C.Config())
+    tok = "pack@7h:e1-A-relative-s0+e1-B-relative-s1"
+    assert steps._expand_shards("e1", [tok], every) == ["e1-A-relative-s0", "e1-B-relative-s1"]
+    assert steps.wall_budget_of([tok]) == 7 * 3600
 
 
 def test_config_survives_the_json_round_trip_to_a_gpu_worker():

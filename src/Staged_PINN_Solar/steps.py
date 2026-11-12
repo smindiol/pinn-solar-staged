@@ -96,11 +96,18 @@ def is_complete(path: Path) -> bool:
 _SHARD = re.compile(r"^shard-(\d+)-of-(\d+)(?:@(\d+(?:\.\d+)?)h)?$")
 
 
+_PACK = re.compile(r"^pack@(\d+(?:\.\d+)?)h:(.+)$")
+
+
 def _expand_shards(step: str, requested: list, every: list) -> list:
     """`shard-k-of-n` stands for `units.shard(every, n)[k]`: a remote worker whose job carries that one
     token runs a whole round-robin slice of the step, so n kernels cover every unit with no waiting."""
     out = []
     for uid in requested:
+        pack = _PACK.match(str(uid))
+        if pack:                                  # `pack@7h:u1+u2`: explicit units of one kernel and its wall budget
+            out.extend(pack.group(2).split("+"))
+            continue
         m = _SHARD.match(str(uid))
         if not m:
             out.append(uid)
@@ -130,6 +137,7 @@ def wall_budget_of(requested) -> float | None:
     """`shard-k-of-n@7.5h` carries the wall budget of the kernel that runs it (hours of the account's quota
     this launch may spend); the smallest one named wins. None when no token names one."""
     hours = [float(m.group(3)) for m in (_SHARD.match(str(u)) for u in (requested or [])) if m and m.group(3)]
+    hours += [float(m.group(1)) for m in (_PACK.match(str(u)) for u in (requested or [])) if m]
     return min(hours) * 3600.0 if hours else None
 
 
@@ -236,10 +244,21 @@ def _run_bayes(spec, prep, cfg, uid, smoke, root, budget: _Budget | None = None)
 WORKER_RESTARTS = 2
 
 
+#: Relative cost of a unit by architecture, from the measured T4 runs (A about 1.45 h, B about 4.1 h).
+UNIT_COST = {"A": 1.0, "B": 3.0}
+
+
 def split_by_cost(pending: list, n: int) -> list:
-    """Deal the units over n workers, the expensive architecture (B) first, so every GPU carries a similar load."""
-    order = sorted(pending, key=lambda u: (units.parse_unit(u).arch != "B", pending.index(u)))
-    return [order[k::n] for k in range(n)]
+    """Spread the units over n workers by cost (each goes to the least-loaded worker, expensive ones first) and
+    order every worker's list cheap-first: the wall guard measures the next unit by the longest one seen, so a
+    cheap unit after an expensive one would be refused although it fits."""
+    cost = lambda u: UNIT_COST.get(units.parse_unit(u).arch, 1.0)
+    bins, load = [[] for _ in range(n)], [0.0] * n
+    for u in sorted(pending, key=lambda u: (-cost(u), pending.index(u))):
+        k = min(range(n), key=lambda i: (load[i], i))
+        bins[k].append(u)
+        load[k] += cost(u)
+    return [sorted(b, key=lambda u: (cost(u), pending.index(u))) for b in bins]
 
 
 def config_from_dict(d: dict) -> Config:

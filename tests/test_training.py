@@ -283,7 +283,7 @@ def test_interrupted_run_resumes_from_its_stage_checkpoint_to_the_same_result(pr
 
     with pytest.raises(training.Interrupted) as stop:
         training.train(spec, prep, CFG, checkpoint=ck, should_stop=stop_after_two)
-    assert stop.value.stages_done == 2 and ck.exists() and ck.with_suffix(".partial.json").exists()
+    assert stop.value.stages_done == 2 and ck.exists() and training.partial_path(ck).exists()
     resumed = training.train(spec, prep, CFG, checkpoint=ck)
     assert resumed["stages_done"] == whole["stages_done"] and len(resumed["stage_progress"]) == whole["stages_done"]
     a, b = whole["per_device_error"], resumed["per_device_error"]
