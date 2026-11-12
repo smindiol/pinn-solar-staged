@@ -93,7 +93,7 @@ def is_complete(path: Path) -> bool:
         return False
 
 
-_SHARD = re.compile(r"^shard-(\d+)-of-(\d+)$")
+_SHARD = re.compile(r"^shard-(\d+)-of-(\d+)(?:@(\d+(?:\.\d+)?)h)?$")
 
 
 def _expand_shards(step: str, requested: list, every: list) -> list:
@@ -126,10 +126,23 @@ def _requested(step: str, requested, cfg: Config, smoke: bool) -> list:
     return list(requested)
 
 
+def wall_budget_of(requested) -> float | None:
+    """`shard-k-of-n@7.5h` carries the wall budget of the kernel that runs it (hours of the account's quota
+    this launch may spend); the smallest one named wins. None when no token names one."""
+    hours = [float(m.group(3)) for m in (_SHARD.match(str(u)) for u in (requested or [])) if m and m.group(3)]
+    return min(hours) * 3600.0 if hours else None
+
+
 def _resolve(step: str, units_arg, smoke, config):
     if smoke is None:
         smoke = os.environ.get("FORGE_RUN_MODE") == "smoke"
     cfg = smoke_config() if smoke else (config or Config())
+    raw = units_arg
+    if raw is None and os.environ.get("FORGE_RUN_UNITS"):
+        raw = json.loads(os.environ["FORGE_RUN_UNITS"])
+    budget = wall_budget_of(raw)
+    if budget is not None and not smoke:
+        cfg = cfg.with_(wall_budget_seconds=budget)
     return smoke, cfg, _requested(step, units_arg, cfg, smoke)
 
 
@@ -313,16 +326,26 @@ def _run_training_step(step: str, units_arg, smoke, config, root=None, out=None,
             if step != "e4":
                 budget.check()
             t0 = time.time()
+            ckpt = path.with_suffix(".ckpt.pt")
             body = _run_bayes(spec, prep, cfg, uid, smoke, out, budget) if step == "e4" \
-                else training.train(spec, prep, cfg)
+                else training.train(spec, prep, cfg, checkpoint=ckpt,
+                                    should_stop=lambda longest: time.time() - budget.start + longest > budget.seconds,
+                                    report=lambda line, uid=uid: progress(f"[{step}] {uid}: {line}"))
         except _OutOfBudget:
             progress(f"[{step}] wall budget reached before {uid}: stopping; a later run resumes the rest")
+            break
+        except training.Interrupted as stop:
+            progress(f"[{step}] {uid}: wall budget reached at stage {stop.stages_done}/{stop.stages_planned}; "
+                     f"partial progress kept in {path.with_suffix('.partial.json').name}")
             break
         if step != "e4":
             budget.took(time.time() - t0)
         body["spec"] = asdict(spec)
         body["wall_seconds"] = time.time() - t0
         _write(path, _record(step, uid, cfg, prep, smoke, body))
+        if step != "e4":
+            ckpt.unlink(missing_ok=True)
+            path.with_suffix(".partial.json").unlink(missing_ok=True)
         progress(f"[{step}] {uid}: written {path.name} diverged={body['diverged']} {body['wall_seconds']:.0f}s")
         done.append(uid)
     return done

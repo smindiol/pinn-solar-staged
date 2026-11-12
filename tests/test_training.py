@@ -269,3 +269,23 @@ def test_chunked_value_and_grad_equals_the_one_graph_gradient(prep) -> None:
     per_term = obj.term_grads(params)
     for k in per_term_want:
         np.testing.assert_allclose(per_term[k], per_term_want[k], rtol=1e-10, atol=1e-14)
+
+
+def test_interrupted_run_resumes_from_its_stage_checkpoint_to_the_same_result(prep, tmp_path) -> None:
+    spec = _spec("e2-A-lbfgs-gradient-s0")
+    whole = training.train(spec, prep, CFG)
+    ck = tmp_path / "u.ckpt.pt"
+    calls = {"n": 0}
+
+    def stop_after_two(_longest):
+        calls["n"] += 1
+        return calls["n"] > 2
+
+    with pytest.raises(training.Interrupted) as stop:
+        training.train(spec, prep, CFG, checkpoint=ck, should_stop=stop_after_two)
+    assert stop.value.stages_done == 2 and ck.exists() and ck.with_suffix(".partial.json").exists()
+    resumed = training.train(spec, prep, CFG, checkpoint=ck)
+    assert resumed["stages_done"] == whole["stages_done"] and len(resumed["stage_progress"]) == whole["stages_done"]
+    a, b = whole["per_device_error"], resumed["per_device_error"]
+    assert all(np.isclose(a[k], b[k], rtol=1e-6, equal_nan=True) for k in a)
+    assert np.isclose(whole["blocks"][-1]["loss_end"], resumed["blocks"][-1]["loss_end"], rtol=1e-8)

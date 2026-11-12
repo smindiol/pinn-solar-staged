@@ -215,3 +215,10 @@ def test_config_survives_the_json_round_trip_to_a_gpu_worker():
     from Staged_PINN_Solar.config import Config
     cfg = Config().with_(wall_budget_seconds=123.0)
     assert steps.config_from_dict(json.loads(json.dumps(cfg.to_dict()))) == cfg
+
+
+def test_shard_token_carries_the_wall_budget_of_its_kernel():
+    assert steps.wall_budget_of(["shard-0-of-5@7.5h"]) == 7.5 * 3600
+    assert steps.wall_budget_of(["shard-0-of-5", "e1-A-relative-s0"]) is None
+    every = units.enumerate_units("e1", C.Config())
+    assert steps._expand_shards("e1", ["shard-1-of-5@7.5h"], every) == steps._expand_shards("e1", ["shard-1-of-5"], every)

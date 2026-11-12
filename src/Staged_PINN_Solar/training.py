@@ -34,6 +34,7 @@ from .carriers import Material
 from .config import Config
 from .optimizers import LBFGS, SOAP
 from .scaling import Scales
+from . import units as units_mod
 from .units import UnitSpec
 
 __provenance__ = {
@@ -441,10 +442,25 @@ def _soap_block(params, soaps, objective, lam, iters, history) -> None:
                 p.copy_(s.step(w, g.reshape(w.shape)).reshape(p.shape))
 
 
+class Interrupted(Exception):
+    """The run stopped at a stage boundary because the next stage would not fit in the wall budget.
+    Its checkpoint is on disk; `stages_done` says how far it got."""
+
+    def __init__(self, stages_done: int, stages_planned: int) -> None:
+        super().__init__(f"stopped after stage {stages_done}/{stages_planned}")
+        self.stages_done, self.stages_planned = stages_done, stages_planned
+
+
 def train(spec: UnitSpec, prep: Prepared, cfg: Config, eval_val: bool = False, lam_fixed: dict | None = None,
-          progress=None) -> dict:
-    """One run of the experiments. `lam_fixed` (the outer loop of E4) fixes lambda for the whole run."""
+          progress=None, checkpoint=None, should_stop=None, report=None) -> dict:
+    """One run of the experiments. `lam_fixed` (the outer loop of E4) fixes lambda for the whole run.
+
+    `checkpoint` (a path) makes the run resumable at voltage-stage boundaries: the state is saved after every
+    stage and a later call with the same path continues from the next one. `should_stop(longest_stage_seconds)`
+    is asked before each stage; True raises `Interrupted` with the checkpoint on disk. `report(line)` receives
+    one progress line per stage (loss, partial PCE error on the test split, seconds)."""
     t0, dev = time.time(), device()
+    checkpoint = Path(checkpoint) if checkpoint else None
     model = ansatz_mod.Ansatz(build_network(spec, cfg, prep).to(dev), prep.bounds)
     params = list(model.parameters())
     sigma2 = {k: 1.0 for k in prep.sigma2} if spec.loss == "unnormalized" else dict(prep.sigma2)
@@ -463,8 +479,25 @@ def train(spec: UnitSpec, prep: Prepared, cfg: Config, eval_val: bool = False, l
     blocks, diag_records, stages, diverged, stages_done = [], [], [], False, 0
     early = {}
     lambda_errors = []
+    progress_log, j0, spent = [], 0, 0.0
+    if checkpoint is not None and checkpoint.exists():
+        ck = torch.load(checkpoint, map_location=dev, weights_only=False)
+        if ck["unit"] == units_mod.unit_id(spec) and ck["K"] == K:
+            model.load_state_dict(ck["model"])
+            bw.values, bw.max_seen, bw.generation = ck["bw"]["values"], ck["bw"]["max_seen"], ck["bw"]["generation"]
+            soaps = ck["soaps"] if soaps is not None else None
+            J_test, J_val = ck["J_test"], ck["J_val"]
+            blocks, diag_records, stages, early = ck["blocks"], ck["diag_records"], ck["stages"], ck["early"]
+            lambda_errors, progress_log, j0, spent = ck["lambda_errors"], ck["progress"], ck["stages_done"], ck["seconds"]
+            stages_done = j0
+            if report:
+                report(f"resumed from checkpoint at stage {j0}/{K}")
+    longest_stage = max([r["seconds"] for r in progress_log], default=0.0)
 
-    for j in range(K):
+    for j in range(j0, K):
+        if should_stop is not None and should_stop(longest_stage):
+            raise Interrupted(j, K)
+        t_stage = time.time()
         V_tilde = j * cfg.voltage_step / prep.scales.V_th
         obj = Objective(model, make_batches(prep.train, j, spec.seed, cfg, dev), V_tilde, sigma2, prep.material,
                         prep.contacts, mode=spec.loss)
@@ -556,6 +589,30 @@ def train(spec: UnitSpec, prep: Prepared, cfg: Config, eval_val: bool = False, l
         if eval_val:
             J_val[:, j] = evaluate_currents(model, prep.val, V_tilde, mat, prep.scales, dev, cfg.eval_chunk)
         stages_done = j + 1
+        stage_blocks = [b for b in blocks if b["stage"] == j]
+        partial = np.array(list(errors_from_curves(J_test, prep.test, stages_done, prep.scales).values()))
+        row = {"stage": j, "V": j * cfg.voltage_step, "loss_start": loss_start_stage,
+               "loss_end": stage_blocks[-1]["loss_end"] if stage_blocks else float("nan"),
+               "partial_pce_error_median": float(np.nanmedian(partial)) if np.isfinite(partial).any() else float("nan"),
+               "seconds": time.time() - t_stage}
+        progress_log.append(row)
+        longest_stage = max(longest_stage, row["seconds"])
+        if report:
+            report(f"stage {j + 1}/{K} V={row['V']:.2f} loss {row['loss_start']:.3e}->{row['loss_end']:.3e} "
+                   f"partial PCE err median {row['partial_pce_error_median']:.2f}% {row['seconds']:.0f}s")
+        if checkpoint is not None:
+            checkpoint.parent.mkdir(parents=True, exist_ok=True)
+            tmp = checkpoint.with_suffix(checkpoint.suffix + ".tmp")
+            torch.save({"unit": units_mod.unit_id(spec), "K": K, "model": model.state_dict(), "soaps": soaps,
+                        "bw": {"values": dict(bw.values), "max_seen": bw.max_seen, "generation": bw.generation},
+                        "J_test": J_test, "J_val": J_val, "blocks": blocks, "diag_records": diag_records,
+                        "stages": stages, "early": early, "lambda_errors": lambda_errors, "progress": progress_log,
+                        "stages_done": stages_done, "seconds": spent + time.time() - t0}, tmp)
+            os.replace(tmp, checkpoint)
+            import json as _json
+            checkpoint.with_suffix(".partial.json").write_text(_json.dumps(
+                {"unit": units_mod.unit_id(spec), "complete": False, "stages_done": stages_done, "stages_planned": K,
+                 "seconds": spent + time.time() - t0, "progress": progress_log}, indent=1))
         if progress:
             progress(spec, j + 1, K)
 
@@ -564,8 +621,8 @@ def train(spec: UnitSpec, prep: Prepared, cfg: Config, eval_val: bool = False, l
             return {uid: float("nan") for uid in bank.uids}
         return errors_from_curves(J, bank, stages_done, prep.scales)
 
-    seconds = time.time() - t0
-    result = {"sigma2_used": sigma2, "blocks": blocks, "stages": stages, "stages_done": stages_done,
+    seconds = spent + time.time() - t0
+    result = {"stage_progress": progress_log, "sigma2_used": sigma2, "blocks": blocks, "stages": stages, "stages_done": stages_done,
               "stages_planned": K, "diverged": diverged, "lambda_final": dict(bw.values), "lambda_max_seen": bw.max_seen, "loss_mode": spec.loss,
               "full_batch": cfg.full_batch,
               "lambda_update_errors": lambda_errors, "per_device_error": errs(prep.test, J_test),
