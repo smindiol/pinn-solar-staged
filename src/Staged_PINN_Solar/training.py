@@ -385,8 +385,49 @@ def _set(params, vec: torch.Tensor) -> None:
 
 
 # --- evaluation (Eqs. 13-14) ------------------------------------------------------------------------
+def gr_current(phi, phi_n, phi_p, m: Material, G: np.ndarray, x_hat: np.ndarray, delta: np.ndarray,
+               contacts, scales: Scales) -> np.ndarray:
+    """Eq. 20 of r07: J = J_0 [ (1/delta) int_0^1 (G - R_total) dx_hat - S_n1 (n(1) - n_eq(1)) - S_p0 (p(0) - p_eq(0)) ].
+
+    Values only, no derivative: Eq. 7 integrated over [0, 1] with the contact conditions of Eq. 9. The arrays are
+    (D, N) per device (torch or numpy for the potentials; numpy for G, x_hat, delta); returns [A/cm^2] per device."""
+    as_np = lambda t: t.detach().cpu().numpy() if isinstance(t, torch.Tensor) else np.asarray(t)
+    n, p = carriers.electron_density(phi, phi_n, m), carriers.hole_density(phi, phi_p, m)
+    n_eq, p_eq = carriers.equilibrium_densities(phi, m)
+    R = as_np(carriers.recombination(n, p, m))
+    n, p, n_eq, p_eq = as_np(n), as_np(p), as_np(n_eq), as_np(p_eq)
+    f = G - R
+    integral = np.sum(0.5 * (f[:, 1:] + f[:, :-1]) * np.diff(x_hat, axis=1), axis=1)
+    j = integral / delta - contacts.S_n1 * (n[:, -1] - n_eq[:, -1]) - contacts.S_p0 * (p[:, 0] - p_eq[:, 0])
+    return scales.J0 * j
+
+
 def evaluate_currents(model, bank: Bank, V_tilde: float, mat: Material, scales: Scales, dev, chunk: int) -> np.ndarray:
-    """J(V) = J_0 mean_nodes (J_n + J_p) of the network at dPV's nodes for every device of `bank` [A/cm^2]."""
+    """J(V) of the network for every device of `bank` by Eq. 20 of r07 (generation-recombination identity) [A/cm^2].
+
+    The spatial mean of the Eq. 6 currents (`evaluate_currents_flux`) multiplies the error of d(phi_n)/dx by n,
+    of the order of the doping where the exact derivative is almost zero: it read 100 % PCE error on networks whose
+    Eq. 20 error is 3-6 % (r07, Section 3)."""
+    contacts = data.device_contacts(scales)
+    out = np.empty(len(bank))
+    N = bank.x_hat.shape[1]
+    for s in range(0, len(bank), chunk):
+        sl = slice(s, min(s + chunk, len(bank)))
+        c = bank.x_hat[sl].shape[0]
+        x = _t(bank.x_hat[sl].reshape(-1, 1), dev)
+        rep = lambda a: _t(np.repeat(a[sl], N)[:, None], dev)
+        with torch.no_grad():
+            phi, phi_n, phi_p = model(x, _t(np.repeat(bank.xi_hat[sl], N, axis=0), dev),
+                                      rep(bank.phi_eq0), rep(bank.phi_eq1), V_tilde)
+        shape = lambda t: t.reshape(c, N)
+        mm = mat.like(shape(phi))
+        out[sl] = gr_current(shape(phi), shape(phi_n), shape(phi_p), mm, bank.G[sl], bank.x_hat[sl],
+                             bank.delta[sl], contacts, scales)
+    return out
+
+
+def evaluate_currents_flux(model, bank: Bank, V_tilde: float, mat: Material, scales: Scales, dev, chunk: int) -> np.ndarray:
+    """Diagnostic only: J(V) = J_0 mean_nodes (J_n + J_p) of the Eq. 6 currents [A/cm^2]; ill-conditioned (r07)."""
     out = np.empty(len(bank))
     N = bank.x_hat.shape[1]
     for s in range(0, len(bank), chunk):

@@ -43,7 +43,7 @@ __provenance__ = {
     "revision": "experiments-protocolo-experimental-de-la-pinn-por-etapas-sobre-dpv-v04.md",
     "sections": ["E6"],
     "experiments": ["E6"],
-    "equations": [12, 13, 18, 19],
+    "equations": [12, 13, 18, 19, 20],
     "invariants": [],
 }
 # r06 (proposal): Eq. 13 scores a trial by the terminal-current error (normalized by J_sc) instead of the field
@@ -73,10 +73,10 @@ BUDGET_HOURS = {"p": 2.2, "q": 2.2, "h": 0.15, "f": 10.5}   # h: smoke capped at
 PRE_DEVICES, PRE_NODES = 64, 32   # data batch of one pretraining step (same size as the physics batch of E1)
 LOSS_MODE = "relative"            # per-node relative residual (r04 Eq. 10), the control arm of E1
 TERMS = training.TERMS + ("data",)
-STUDY = "e6r6"                    # r06 study: new criterion, so the r05 journal is not continued
-JOURNAL = "optuna_journal_r06.log"
-BEST = "best_lambda_r06.json"
-UNIT = "e6r6-A-s"                 # final units of r06; the r05 units were e6-A-s<seed>
+STUDY = "e6r7"                    # r07 study: Eq. 13 read through the Eq. 20 current, so no earlier journal is continued
+JOURNAL = "optuna_journal_r07.log"
+BEST = "best_lambda_r07.json"
+UNIT = "e6r7-A-s"                 # final units of r07; r06 units were e6r6-A-s<seed>, r05 units e6-A-s<seed>
 
 
 def results_dir() -> Path:

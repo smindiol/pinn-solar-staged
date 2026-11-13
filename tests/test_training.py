@@ -9,7 +9,7 @@ import pytest
 import torch
 
 from Staged_PINN_Solar import config as C
-from Staged_PINN_Solar import data, loss, residuals, training, units
+from Staged_PINN_Solar import carriers, data, loss, residuals, training, units
 from Staged_PINN_Solar.optimizers import LBFGS
 from Staged_PINN_Solar.scaling import Scales
 
@@ -289,3 +289,44 @@ def test_interrupted_run_resumes_from_its_stage_checkpoint_to_the_same_result(pr
     a, b = whole["per_device_error"], resumed["per_device_error"]
     assert all(np.isclose(a[k], b[k], rtol=1e-6, equal_nan=True) for k in a)
     assert np.isclose(whole["blocks"][-1]["loss_end"], resumed["blocks"][-1]["loss_end"], rtol=1e-8)
+
+
+needs_dataset_gr = pytest.mark.skipif(not (data.default_root() / "s1").exists(),
+                                      reason="dPV reference set not available")
+
+
+def _gr_on_device(dev, scales, dphi_n=0.0):
+    m = data.device_material(dev, scales)
+    k = min(len(dev.V), 13)
+    J = training.gr_current(dev.phi[:k], dev.phi_n[:k] + dphi_n, dev.phi_p[:k], m, np.repeat(dev.G[None], k, 0),
+                            np.repeat(dev.x_hat[None], k, 0), np.full(k, dev.delta(scales)),
+                            data.device_contacts(scales), scales)
+    return J, dev.J[:k]
+
+
+@needs_dataset_gr
+def test_gr_current_reproduces_dpv_terminal_current() -> None:
+    """Eq. 20 of r07 on dPV's own potentials gives dPV's stored current to the grid floor (< 1e-2 Jsc)."""
+    scales = Scales()
+    for ref in data.inventory()[:4] + data.inventory()[-4:]:
+        J, ref_J = _gr_on_device(data.load_device(ref), scales)
+        assert np.max(np.abs(J - ref_J)) / abs(ref_J[0]) < 1e-2
+
+
+@needs_dataset_gr
+def test_gr_current_is_stable_where_the_flux_mean_is_not() -> None:
+    """A 1e-2 linear drift of phi_n (relative ~2.5e-4 of its range) moves Eq. 20 by < 2e-2 Jsc and the Eq. 6 flux mean by > 1 Jsc."""
+    scales = Scales()
+    dev = data.load_device(data.inventory()[0])
+    e = 1e-2 * dev.x_hat[None]
+    J0, _ = _gr_on_device(dev, scales)
+    J1, ref_J = _gr_on_device(dev, scales, dphi_n=e)
+    jsc = abs(ref_J[0])
+    assert np.max(np.abs(J1 - J0)) / jsc < 2e-2
+    m = data.device_material(dev, scales)
+    flux = lambda pn: scales.J0 * np.mean(
+        residuals.current_density(m.mu_n, carriers.electron_density(dev.phi[0], pn, m),
+                                  np.gradient(pn, dev.x_hat), dev.delta(scales))
+        + residuals.current_density(m.mu_p, carriers.hole_density(dev.phi[0], dev.phi_p[0], m),
+                                    np.gradient(dev.phi_p[0], dev.x_hat), dev.delta(scales)))
+    assert abs(flux(dev.phi_n[0] + e[0]) - flux(dev.phi_n[0])) / jsc > 1.0
