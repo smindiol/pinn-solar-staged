@@ -68,7 +68,7 @@ SMOKE = dict(stages=3, adam_max=100, lbfgs_max=50)
 EVERY = 25                  # history / progress line every EVERY steps
 GRAD_EVERY = 100            # per-term gradient norms every GRAD_EVERY Adam steps (6 backward passes each)
 CKPT_SECONDS = 15 * 60
-BUDGET_HOURS = {"p": 2.2, "q": 2.2, "h": 0.9, "f": 10.5}
+BUDGET_HOURS = {"p": 2.2, "q": 2.2, "h": 0.15, "f": 10.5}   # h: smoke capped at 9 min (operator, 2026-11-13)
 
 PRE_DEVICES, PRE_NODES = 64, 32   # data batch of one pretraining step (same size as the physics batch of E1)
 LOSS_MODE = "relative"            # per-node relative residual (r04 Eq. 10), the control arm of E1
