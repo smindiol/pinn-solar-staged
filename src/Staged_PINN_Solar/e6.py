@@ -35,7 +35,7 @@ import numpy as np
 import torch
 
 from . import ansatz as ansatz_mod
-from . import data, diagnostics, steps, training, weights
+from . import data, diagnostics, pce, steps, training, weights
 from .config import Config
 from .units import UnitSpec
 
@@ -43,8 +43,12 @@ __provenance__ = {
     "revision": "experiments-protocolo-experimental-de-la-pinn-por-etapas-sobre-dpv-v04.md",
     "sections": ["E6"],
     "experiments": ["E6"],
+    "equations": [12, 13, 18, 19],
     "invariants": [],
 }
+# r06 (proposal): Eq. 13 scores a trial by the terminal-current error (normalized by J_sc) instead of the field
+# error of Eq. 18, and both the study and the final training start from theta_prev, the final networks of the r05
+# run (one per seed and stage, handed over as handoff-e6/prev-s<seed>.pt).
 
 # --- the parameters table of E6 (experiments v04) ---------------------------------------------------------
 PRE_STEPS = 500             # pretraining Adam steps per stage
@@ -55,7 +59,7 @@ BOX_DECADES = 2.0           # half-width b of the search box, in log10
 TPE_SEED, TPE_STARTUP = 0, 5
 GRID = (0, 4, 8, 12, 16, 20)  # trial stage grid
 TRIAL_STEPS = 300           # T, Adam steps per trial stage
-PENALTY = 1e3               # objective of a diverged trial
+PENALTY = 1e3               # objective of a diverged trial, in log10 units (finite log10 values stay below 309)
 ADAM_MAX = 1000             # final Adam, steps per stage
 TAU, WINDOW = 1e-3, 100     # switch when the relative improvement over WINDOW steps falls below TAU
 LBFGS_HISTORY, LBFGS_MAX = 50, 500
@@ -69,7 +73,10 @@ BUDGET_HOURS = {"p": 2.2, "q": 2.2, "h": 0.9, "f": 10.5}
 PRE_DEVICES, PRE_NODES = 64, 32   # data batch of one pretraining step (same size as the physics batch of E1)
 LOSS_MODE = "relative"            # per-node relative residual (r04 Eq. 10), the control arm of E1
 TERMS = training.TERMS + ("data",)
-STUDY = "e6"
+STUDY = "e6r6"                    # r06 study: new criterion, so the r05 journal is not continued
+JOURNAL = "optuna_journal_r06.log"
+BEST = "best_lambda_r06.json"
+UNIT = "e6r6-A-s"                 # final units of r06; the r05 units were e6-A-s<seed>
 
 
 def results_dir() -> Path:
@@ -82,6 +89,16 @@ def handoff_dir() -> Path:
 
 
 # --- context: E1's prepared splits plus the stored potentials -------------------------------------------
+def _currents(refs, K: int, scales) -> np.ndarray:
+    """(D, K) dPV terminal current J^dPV(V_j) of every device (r06 Eq. 13), NaN past the device's curve."""
+    out = np.full((len(refs), K), np.nan)
+    for d, ref in enumerate(refs):
+        j = pce.terminal_current_stored(data.load_device(ref), scales)
+        n = min(len(j), K)
+        out[d, :n] = j[:n]
+    return out
+
+
 def _fields(refs, K: int) -> np.ndarray:
     """(D, K, 3, N) float32 stored phi, phi_n, phi_p of every device and stage (NaN past the device's curve)."""
     out = None
@@ -95,8 +112,9 @@ def _fields(refs, K: int) -> np.ndarray:
 
 
 class Ctx:
-    def __init__(self, prep, fields: dict, cfg: Config, K: int) -> None:
+    def __init__(self, prep, fields: dict, cfg: Config, K: int, currents: dict) -> None:
         self.prep, self.fields, self.cfg, self.K = prep, fields, cfg, K
+        self.currents = currents          # split -> (D, K) dPV terminal current [A/cm^2], NaN past the curve
         self.dev = training.device()
         b = prep.bounds
         self.scale = torch.tensor([[b.D_phi, b.phi_n[1] - b.phi_n[0], b.phi_p[1] - b.phi_p[0]]],
@@ -113,22 +131,24 @@ def build_ctx(cfg: Config | None = None, report=print) -> Ctx:
     prep = training.prepare(None, cfg)
     K = min(int(prep.train.n_V.max()), cfg.max_voltages, cfg.max_stages or 10 ** 9)
     fields = {s: _fields(prep.refs[s], K) for s in ("train", "val", "test")}
+    currents = {s: _currents(prep.refs[s], K, prep.scales) for s in ("val", "test")}
     report(f"[e6] data ready: {len(prep.train)}/{len(prep.val)}/{len(prep.test)} devices, {K} stages, "
            f"{time.time() - t0:.0f}s")
-    return Ctx(prep, fields, cfg, K)
+    return Ctx(prep, fields, cfg, K, currents)
 
 
 def _save_ctx(ctx: Ctx) -> str:
     path = Path(tempfile.gettempdir()) / "e6-ctx.pkl"
     with open(path, "wb") as f:
-        pickle.dump({"prep": ctx.prep, "fields": ctx.fields, "cfg": ctx.cfg, "K": ctx.K}, f, protocol=5)
+        pickle.dump({"prep": ctx.prep, "fields": ctx.fields, "cfg": ctx.cfg, "K": ctx.K,
+                     "currents": ctx.currents}, f, protocol=5)
     return str(path)
 
 
 def _load_ctx(path: str) -> Ctx:
     with open(path, "rb") as f:
         d = pickle.load(f)
-    return Ctx(d["prep"], d["fields"], d["cfg"], d["K"])
+    return Ctx(d["prep"], d["fields"], d["cfg"], d["K"], d["currents"])
 
 
 # --- batches and the loss ------------------------------------------------------------------------------
@@ -203,6 +223,19 @@ def field_error(ctx: Ctx, model, split: str, stage: int, chunk: int = 32) -> flo
         total += float(data_loss(model, b, ctx.V(stage), ctx.scale)) * n
         count += n
     return total / count if count else float("nan")
+
+
+def current_error(ctx: Ctx, model, split: str, stage: int) -> float:
+    """r06 Eq. 13: mean over the devices of `split` whose curve reaches `stage` of
+    ((J(V_j; theta) - J^dPV(V_j)) / J_sc^dPV)^2, with J_sc^dPV = J^dPV(0)."""
+    bank, ref = getattr(ctx.prep, split), ctx.currents[split]
+    eligible = np.nonzero(bank.n_V > stage)[0]
+    if eligible.size == 0:
+        return float("nan")
+    J = training.evaluate_currents(model, bank, ctx.V(stage), ctx.prep.material, ctx.prep.scales, ctx.dev,
+                                   ctx.cfg.eval_chunk)
+    r = (J[eligible] - ref[eligible, stage]) / ref[eligible, 0]
+    return float(np.mean(r ** 2))
 
 
 # --- telemetry ------------------------------------------------------------------------------------------
@@ -386,9 +419,12 @@ def full_lambda(phys: dict) -> dict:
     return {**{k: float(phys[k]) for k in training.TERMS}, "data": LAMBDA_DATA}
 
 
-def run_trial(ctx: Ctx, pre: dict, lam: dict, seed: int, deadline: float, trial=None, tel=None) -> float:
-    """theta_T(lambda): per grid stage, TRIAL_STEPS Adam steps from theta_pre of that stage; the objective is the
-    mean validation Eq. 18 over the stages done, reported after each stage to the pruner."""
+def run_trial(ctx: Ctx, start: dict, lam: dict, seed: int, deadline: float, trial=None, tel=None) -> float:
+    """theta_T(lambda): per grid stage, TRIAL_STEPS Adam steps from theta_prev of that stage (r06); the objective
+    is the mean validation current error of r06 Eq. 13 over the stages done, reported after each stage to the
+    pruner. The study minimizes log10 of that mean: a monotone transform, so the argmin of Eq. 13, TPE's
+    quantile split and the median pruner's decisions are unchanged, while values that span 1e-4 to 1e24 stay
+    comparable to the fixed penalty of a diverged trial."""
     import optuna
     model = new_model(ctx, seed)
     params = list(model.parameters())
@@ -396,7 +432,7 @@ def run_trial(ctx: Ctx, pre: dict, lam: dict, seed: int, deadline: float, trial=
     for i, j in enumerate(GRID):
         if time.time() > deadline:
             raise TimeoutError("deadline inside a trial")
-        model.load_state_dict(pre[j])
+        model.load_state_dict(start[j])
         obj = PhasedObjective(ctx, model, physics_batch(ctx, j, seed), j)
         opt, sched = _adam(params, TRIAL_STEPS)
         for s in range(TRIAL_STEPS):
@@ -407,20 +443,21 @@ def run_trial(ctx: Ctx, pre: dict, lam: dict, seed: int, deadline: float, trial=
             torch.nn.utils.clip_grad_norm_(params, CLIP)
             opt.step()
             sched.step()
-        e = field_error(ctx, model, "val", j)
+        e = current_error(ctx, model, "val", j)
         if not math.isfinite(e):
             return PENALTY
         vals.append(e)
         if tel is not None:
-            tel.log(kind="trial_stage", trial=trial.number if trial else None, stage=j, field_error_val=e)
+            tel.log(kind="trial_stage", trial=trial.number if trial else None, stage=j, current_error_val=e,
+                    field_error_val=field_error(ctx, model, "val", j))
         if trial is not None:
-            trial.report(float(np.mean(vals)), i)
+            trial.report(float(np.log10(np.mean(vals))), i)
             if trial.should_prune():
                 raise optuna.TrialPruned()
-    return float(np.mean(vals))
+    return float(np.log10(np.mean(vals)))
 
 
-def tune_loop(ctx: Ctx, pre: dict, journal: Path, worker: int, deadline: float, tel: Telemetry) -> None:
+def tune_loop(ctx: Ctx, start: dict, journal: Path, worker: int, deadline: float, tel: Telemetry) -> None:
     import optuna
     from optuna.trial import TrialState
     study = open_study(journal, worker)
@@ -435,7 +472,7 @@ def tune_loop(ctx: Ctx, pre: dict, journal: Path, worker: int, deadline: float, 
                                                           math.log10(c[k]) + BOX_DECADES) for k in training.TERMS})
         t = time.time()
         try:
-            value = run_trial(ctx, pre, lam, 0, deadline, trial, tel)
+            value = run_trial(ctx, start, lam, 0, deadline, trial, tel)
             study.tell(trial, value)
             state = "complete" if value < PENALTY else "diverged"
         except optuna.TrialPruned:
@@ -477,7 +514,7 @@ def study_summary(journal: Path) -> dict:
 
 # --- the final recipe -----------------------------------------------------------------------------------
 def final_unit(ctx: Ctx, uid: str, seed: int, lam: dict, out: Path, deadline: float, n_stages: int | None = None,
-               adam_max: int = ADAM_MAX, lbfgs_max: int = LBFGS_MAX) -> dict | None:
+               adam_max: int = ADAM_MAX, lbfgs_max: int = LBFGS_MAX, start: dict | None = None) -> dict | None:
     """One seed: pretraining, then per stage Adam -> L-BFGS from theta_pre of that stage with the same loss and the
     same lambda. Resumable from `<uid>.ckpt.pt` (per stage, and every 15 min inside Adam). Returns the record, or
     None when the wall budget stopped it (checkpoint and partial record on disk)."""
@@ -498,7 +535,8 @@ def final_unit(ctx: Ctx, uid: str, seed: int, lam: dict, out: Path, deadline: fl
         os.replace(tmp, ckpt)
 
     if st["pre"] is None:
-        st["pre"] = pretrain(ctx, seed, K, tel, deadline)
+        # r06: start from theta_prev of this seed when handed over; otherwise pretrain as in r05
+        st["pre"] = start if start is not None else pretrain(ctx, seed, K, tel, deadline)
         save()
     model = new_model(ctx, seed)
     params = list(model.parameters())
@@ -638,15 +676,16 @@ def _worker(payload: str) -> None:
     ctx = _load_ctx(a["ctx"])
     out = Path(a["out"])
     if a["role"] == "tune":
-        pre = torch.load(a["pre"], map_location="cpu", weights_only=False)
-        tune_loop(ctx, pre, Path(a["journal"]), a["worker"], a["deadline"], Telemetry(out, f"tune-w{a['worker']}"))
+        start = torch.load(a["start"], map_location="cpu", weights_only=False)
+        tune_loop(ctx, start, Path(a["journal"]), a["worker"], a["deadline"], Telemetry(out, f"tune-w{a['worker']}"))
     else:
         lam = a["lambda"]
         for uid in a["units"]:
             if steps.is_complete(out / f"{uid}.json"):
                 print(f"[{uid}] complete, skipped", flush=True)
                 continue
-            if final_unit(ctx, uid, int(uid.rsplit("s", 1)[1]), lam, out, a["deadline"]) is None:
+            seed = int(uid.rsplit("s", 1)[1])
+            if final_unit(ctx, uid, seed, lam, out, a["deadline"], start=prev_models(seed)) is None:
                 break
 
 
@@ -690,12 +729,14 @@ def _run_payloads(payloads: list, ctx: Ctx, deadline: float) -> None:
         return
     for p in payloads:                     # one device: the payloads run here, one after the other
         if p["role"] == "tune":
-            pre = torch.load(p["pre"], map_location="cpu", weights_only=False)
-            tune_loop(ctx, pre, Path(p["journal"]), p["worker"], deadline, Telemetry(Path(p["out"]), f"tune-w{p['worker']}"))
+            start = torch.load(p["start"], map_location="cpu", weights_only=False)
+            tune_loop(ctx, start, Path(p["journal"]), p["worker"], deadline, Telemetry(Path(p["out"]), f"tune-w{p['worker']}"))
         else:
             for uid in p["units"]:
                 if not steps.is_complete(Path(p["out"]) / f"{uid}.json"):
-                    if final_unit(ctx, uid, int(uid.rsplit("s", 1)[1]), p["lambda"], Path(p["out"]), deadline) is None:
+                    seed = int(uid.rsplit("s", 1)[1])
+                    if final_unit(ctx, uid, seed, p["lambda"], Path(p["out"]), deadline,
+                                  start=prev_models(seed)) is None:
                         return
 
 
@@ -717,29 +758,44 @@ def _handoff_file(name: str) -> Path | None:
     return None
 
 
+def prev_path(seed: int) -> Path | None:
+    """theta_prev of `seed`: the final networks of the r05 run, one state per stage (handoff-e6/prev-s<seed>.pt)."""
+    return _handoff_file(f"prev-s{seed}.pt")
+
+
+def prev_models(seed: int) -> dict | None:
+    p = prev_path(seed)
+    return torch.load(p, map_location="cpu", weights_only=False) if p is not None else None
+
+
 def run_p() -> dict:
-    """Pretraining (seed 0, every stage) + Eq. 12 centre + the first part of the study on every GPU."""
+    """Eq. 12 centre at theta_pre (pretrained.pt, pretrained here if absent) + the first part of the r06 study,
+    whose trials start from theta_prev of seed 0, on every GPU."""
     start = time.time()
     deadline = _deadline("p", start)
     out = results_dir()
     out.mkdir(parents=True, exist_ok=True)
     ctx = build_ctx()
     tel = Telemetry(out, "pretrain-s0")
-    pre_path = out / "pretrained.pt"
-    if pre_path.exists():
+    pre_path = _handoff_file("pretrained.pt")
+    if pre_path is not None:
         pre = torch.load(pre_path, map_location="cpu", weights_only=False)
     else:
+        pre_path = out / "pretrained.pt"
         pre = pretrain(ctx, 0, ctx.K, tel, deadline)
         torch.save(pre, pre_path)
-    tel.plot()
-    journal = out / "optuna_journal.log"
+        tel.plot()
+    start_path = prev_path(0)
+    if start_path is None:
+        raise FileNotFoundError("prev-s0.pt (theta_prev, r06) is neither in Results/e6 nor in handoff-e6/")
+    journal = out / JOURNAL
     c = centre(ctx, pre, 0)
     tel.line(f"Eq. 12 centre (lambda_data = 1): {json.dumps({k: float(f'{v:.3e}') for k, v in c.items()})}")
     open_study(journal, 0, create_centre=c)
     if ctx.dev.type == "cuda":
         torch.cuda.empty_cache()
     n = max(_n_gpu(), 1)
-    _run_payloads([{"role": "tune", "worker": w, "pre": str(pre_path), "journal": str(journal), "out": str(out),
+    _run_payloads([{"role": "tune", "worker": w, "start": str(start_path), "journal": str(journal), "out": str(out),
                     "deadline": deadline} for w in range(min(n, 2))], ctx, deadline)
     return _close_study(out, journal, "p", start)
 
@@ -750,16 +806,15 @@ def run_q() -> dict:
     deadline = _deadline("q", start)
     out = results_dir()
     out.mkdir(parents=True, exist_ok=True)
-    journal = out / "optuna_journal.log"
+    journal = out / JOURNAL
     if not journal.exists():
-        shutil.copy(handoff_dir() / "optuna_journal.log", journal)
-    pre_path = _handoff_file("pretrained.pt")
+        shutil.copy(handoff_dir() / JOURNAL, journal)
+    start_path = prev_path(0)
+    if start_path is None:
+        raise FileNotFoundError("prev-s0.pt (theta_prev, r06) is neither in Results/e6 nor in handoff-e6/")
     ctx = build_ctx()
-    if pre_path is None:                   # P never wrote it: pretrain here first (stated in the checklist)
-        pre_path = out / "pretrained.pt"
-        torch.save(pretrain(ctx, 0, ctx.K, Telemetry(out, "pretrain-s0"), deadline), pre_path)
     n = max(_n_gpu(), 1)
-    _run_payloads([{"role": "tune", "worker": 2 + w, "pre": str(pre_path), "journal": str(journal),
+    _run_payloads([{"role": "tune", "worker": 2 + w, "start": str(start_path), "journal": str(journal),
                     "out": str(out), "deadline": deadline} for w in range(min(n, 2))], ctx, deadline)
     return _close_study(out, journal, "q", start)
 
@@ -769,7 +824,7 @@ def _close_study(out: Path, journal: Path, stage: str, start: float) -> dict:
     s.update(stage=stage, hours=(time.time() - start) / 3600.0, created=steps._now())
     steps._write(out / f"study-{stage}.json", s)
     if "best_lambda" in s:
-        steps._write(out / "best_lambda.json", {"lambda": s["best_lambda"], "trial": s["best_trial"],
+        steps._write(out / BEST, {"lambda": s["best_lambda"], "trial": s["best_trial"],
                                                 "value": s["best_value"], "after_stage": stage})
     print(f"[e6{stage}] trials {s['n_trials']} · complete {s['complete']} · pruned {s['pruned']} · "
           f"failed {s['failed']} · best {s.get('best_value')}", flush=True)
@@ -781,9 +836,9 @@ def _close_study(out: Path, journal: Path, stage: str, start: float) -> dict:
 
 
 def _lambda_star() -> dict:
-    p = _handoff_file("best_lambda.json")
+    p = _handoff_file(BEST)
     if p is None:
-        raise FileNotFoundError("best_lambda.json is neither in Results/e6 nor in handoff-e6/")
+        raise FileNotFoundError(f"{BEST} is neither in Results/e6 nor in handoff-e6/")
     return json.loads(p.read_text())["lambda"]
 
 
@@ -793,8 +848,8 @@ def run_h() -> dict | None:
     deadline = _deadline("h", start)
     out = results_dir()
     ctx = build_ctx()
-    return final_unit(ctx, "e6-smoke-s0", 0, _lambda_star(), out, deadline, n_stages=SMOKE["stages"],
-                      adam_max=SMOKE["adam_max"], lbfgs_max=SMOKE["lbfgs_max"])
+    return final_unit(ctx, f"{UNIT[:-2]}-smoke-s0", 0, _lambda_star(), out, deadline, n_stages=SMOKE["stages"],
+                      adam_max=SMOKE["adam_max"], lbfgs_max=SMOKE["lbfgs_max"], start=prev_models(0))
 
 
 def run_f() -> list:
@@ -804,7 +859,7 @@ def run_f() -> list:
     out = results_dir()
     lam = _lambda_star()
     packs = []
-    default = ["pack@10.5h:e6-A-s0+e6-A-s1+e6-A-s2", "pack@10.5h:e6-A-s3+e6-A-s4"]   # 3 seeds on GPU 0, 2 on GPU 1
+    default = [f"pack@10.5h:{UNIT}0+{UNIT}1+{UNIT}2", f"pack@10.5h:{UNIT}3+{UNIT}4"]   # 3 seeds on GPU 0, 2 on GPU 1
     for tok in _tokens() or default:
         m = steps._PACK.match(str(tok))
         packs.append(m.group(2).split("+") if m else [str(tok)])
