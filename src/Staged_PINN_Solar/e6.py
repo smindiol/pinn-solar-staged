@@ -43,7 +43,7 @@ __provenance__ = {
     "revision": "experiments-protocolo-experimental-de-la-pinn-por-etapas-sobre-dpv-v04.md",
     "sections": ["E6"],
     "experiments": ["E6"],
-    "equations": [12, 13, 18, 19, 20],
+    "equations": [12, 13, 18, 19, 20, 21],
     "invariants": [],
 }
 # r06 (proposal): Eq. 13 scores a trial by the terminal-current error (normalized by J_sc) instead of the field
@@ -52,7 +52,7 @@ __provenance__ = {
 
 # --- the parameters table of E6 (experiments v04) ---------------------------------------------------------
 PRE_STEPS = 500             # pretraining Adam steps per stage
-LR0, LR_END = 1e-3, 5e-5    # Adam, cosine from LR0 to LR_END
+LR0, LR_END = 1e-4, 5e-6    # Adam, cosine from LR0 to LR_END (r08: low rate, every start is an already trained network)
 CLIP = 1.0                  # gradient-norm clip
 LAMBDA_DATA = 1.0           # reference weight
 BOX_DECADES = 2.0           # half-width b of the search box, in log10
@@ -73,10 +73,11 @@ BUDGET_HOURS = {"p": 2.2, "q": 2.2, "h": 0.15, "f": 10.5}   # h: smoke capped at
 PRE_DEVICES, PRE_NODES = 64, 32   # data batch of one pretraining step (same size as the physics batch of E1)
 LOSS_MODE = "relative"            # per-node relative residual (r04 Eq. 10), the control arm of E1
 TERMS = training.TERMS + ("data",)
-STUDY = "e6r7"                    # r07 study: Eq. 13 read through the Eq. 20 current, so no earlier journal is continued
-JOURNAL = "optuna_journal_r07.log"
-BEST = "best_lambda_r07.json"
-UNIT = "e6r7-A-s"                 # final units of r07; r06 units were e6r6-A-s<seed>, r05 units e6-A-s<seed>
+JUNCTION_HALF_WIDTH, EDGE_WIDTH = 0.05, 0.02   # node sampling: every node within these x_hat windows, the rest uniform
+STUDY = "e6r8"                    # r08: no new study; lambda recentred from r05 (best_lambda_r08.json)
+JOURNAL = "optuna_journal_r08.log"
+BEST = "best_lambda_r08.json"
+UNIT = "e6r8-A-s"                 # final units of r08; r07 units were e6r7-A-s<seed>, r05 units e6-A-s<seed>
 
 
 def results_dir() -> Path:
@@ -152,15 +153,45 @@ def _load_ctx(path: str) -> Ctx:
 
 
 # --- batches and the loss ------------------------------------------------------------------------------
+def junction_position(x_hat: np.ndarray, Ndop: np.ndarray) -> np.ndarray:
+    """x_hat of the p-n junction per device: the node where the doping changes sign. (P, N) -> (P,)."""
+    j = np.argmax(np.diff(np.sign(Ndop), axis=1) != 0, axis=1)
+    return x_hat[np.arange(x_hat.shape[0]), j]
+
+
+def junction_nodes(x_hat: np.ndarray, Ndop: np.ndarray, k: int, rng, half_width: float = None,
+                   edge_width: float = None) -> np.ndarray:
+    """Interior nodes per device: EVERY node within `half_width` of the p-n junction x_j and EVERY node within
+    `edge_width` of either contact, plus `k` nodes drawn uniformly among the remaining interior nodes. On dPV's
+    uniform grid the windows hold the same number of nodes in every device, so the batch is rectangular.
+    (P, n_window + k) sorted indices into the full grid (contacts excluded)."""
+    half_width = JUNCTION_HALF_WIDTH if half_width is None else half_width
+    edge_width = EDGE_WIDTH if edge_width is None else edge_width
+    P, N = x_hat.shape
+    h = 1.0 / (N - 1)
+    nj, ne = int(round(2 * half_width / h)), int(round(edge_width / h))
+    inner = np.arange(1, N - 1)
+    jidx = np.argmin(np.abs(x_hat - junction_position(x_hat, Ndop)[:, None]), axis=1)
+    out = []
+    for d in range(P):
+        lo = int(np.clip(jidx[d] - nj // 2, 1 + ne, N - 1 - ne - nj))
+        fixed = np.unique(np.concatenate([inner[:ne], np.arange(lo, lo + nj), inner[-ne:] if ne else []]).astype(int))
+        rest = np.setdiff1d(inner, fixed)
+        out.append(np.sort(np.concatenate([fixed, rng.choice(rest, size=min(k, rest.size), replace=False)])))
+    return np.stack(out)
+
+
 def stage_batch(ctx: Ctx, split: str, stage: int, key, n_dev: int, n_nodes: int) -> dict:
-    """`training.make_batch`'s selection (same rng recipe) plus the stored outputs at the chosen nodes."""
+    """The devices `training.make_batch` picks for the key, with the nodes of `junction_nodes` (every node of the
+    junction and contact windows, where the r05 networks keep more than half of their field error on a tenth
+    of the nodes, plus a uniform draw of the rest) and the stored outputs at those nodes."""
     bank = getattr(ctx.prep, split)
     eligible = np.nonzero(bank.n_V > stage)[0]
     rng = np.random.default_rng(key)
     pick = np.sort(rng.choice(eligible, size=min(n_dev, eligible.size), replace=False))
     N = bank.x_hat.shape[1]
     k = min(n_nodes, N - 2)
-    idx = np.argsort(rng.random((pick.size, N - 2)), axis=1)[:, :k] + 1
+    idx = junction_nodes(bank.x_hat[pick], bank.Ndop[pick], k, rng)
     b = training._gather(bank, pick, idx, ctx.dev)
     tgt = ctx.fields[split][pick[:, None], stage, :, idx]            # (P, k, 3)
     b["target"] = training._t(tgt.reshape(-1, 3).astype(np.float64), ctx.dev)
@@ -168,7 +199,7 @@ def stage_batch(ctx: Ctx, split: str, stage: int, key, n_dev: int, n_nodes: int)
 
 
 def physics_batch(ctx: Ctx, stage: int, seed: int) -> dict:
-    """The fixed batch of a stage: exactly the nodes `training.make_batch` gives E1 for (seed, stage)."""
+    """The fixed batch of a stage: a function of (seed, stage), junction-concentrated nodes."""
     return stage_batch(ctx, "train", stage, [int(seed), int(stage), 17], ctx.cfg.n_devices_per_batch,
                        ctx.cfg.n_nodes_per_device)
 

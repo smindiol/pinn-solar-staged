@@ -330,3 +330,26 @@ def test_gr_current_is_stable_where_the_flux_mean_is_not() -> None:
         + residuals.current_density(m.mu_p, carriers.hole_density(dev.phi[0], dev.phi_p[0], m),
                                     np.gradient(dev.phi_p[0], dev.x_hat), dev.delta(scales)))
     assert abs(flux(dev.phi_n[0] + e[0]) - flux(dev.phi_n[0])) / jsc > 1.0
+
+
+def _junction_case(P=6, N=500, seed=0):
+    rng = np.random.default_rng(seed)
+    x = np.tile(np.linspace(0.0, 1.0, N), (P, 1))
+    xj = rng.uniform(0.2, 0.8, P)
+    return x, np.where(x <= xj[:, None], 1.0, -1.0), xj
+
+
+def test_junction_nodes_take_every_window_node_and_a_uniform_rest() -> None:
+    """Every node within 0.05 of the junction and within 0.02 of each contact is in the batch, plus k distinct
+    uniform nodes elsewhere; no contact node, no repeat, same count in every device."""
+    from Staged_PINN_Solar import e6
+    x, nd, xj = _junction_case()
+    assert np.allclose(e6.junction_position(x, nd), xj, atol=1.0 / 499)
+    idx = e6.junction_nodes(x, nd, 32, np.random.default_rng(1), 0.05, 0.02)
+    xs = np.take_along_axis(x, idx, 1)
+    assert idx.min() >= 1 and idx.max() <= 498 and all(len(set(r)) == idx.shape[1] for r in idx)
+    for d in range(x.shape[0]):
+        want = [i for i in range(1, 499) if abs(x[d, i] - xj[d]) < 0.05 - 1.5 / 499 or x[d, i] < 0.02 - 1e-9 or x[d, i] > 0.98 + 1e-9]
+        assert set(want) <= set(idx[d])
+    far = (np.abs(xs - xj[:, None]) > 0.06) & (xs > 0.03) & (xs < 0.97)
+    assert (far.sum(axis=1) >= 20).all()
