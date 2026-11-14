@@ -180,7 +180,7 @@ def test_scratch_centre_covers_every_term_and_join_picks_the_best_complete_trial
     assert all(u.startswith(scratch.UNIT) for packs in plan for p in packs for u in p)
 
 
-def test_scratch_final_unit_pretrains_from_nothing_and_runs_fixed_adam(ctx, tmp_path, monkeypatch) -> None:
+def test_scratch_final_unit_starts_from_the_random_init_and_runs_fixed_adam(ctx, tmp_path, monkeypatch) -> None:
     def pb(c, j, seed):
         idx = np.tile(np.arange(4), (2, 1))
         b = training._gather(c.prep.train, np.array([0, 1]), idx, c.dev)
@@ -195,7 +195,10 @@ def test_scratch_final_unit_pretrains_from_nothing_and_runs_fixed_adam(ctx, tmp_
     lam = {**{k: 1.0 for k in e6.TERMS}, "J": 1.0}
     uid = "e6s-A-s0.p0of3"
     seed, stages, _ = e6.unit_spec(uid, ctx.K)
+    monkeypatch.setattr(e6, "pretrain", lambda *a, **k: pytest.fail("scratch must not pretrain"))
+    start = e6.random_start(ctx, seed)
+    assert all(torch.equal(start[0][k], e6._cpu_state(e6.new_model(ctx, seed))[k]) for k in start[0])
     rec = e6.final_unit(ctx, uid, seed, lam, tmp_path, time.time() + 600, adam_max=8, lbfgs_max=2,
-                        start=None, stages=stages, tau=None)
+                        start=start, stages=stages, tau=None)
     assert rec["stage_progress"][0]["adam_steps"] == 8 and rec["recipe"]["tau"] is None
     assert sorted(torch.load(tmp_path / f"{uid}.models.pt", weights_only=False)["final"]) == stages

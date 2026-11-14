@@ -874,7 +874,7 @@ def _worker(payload: str) -> None:
                 continue
             seed, stages, _ = unit_spec(uid, ctx.K)
             stages = stages[:a["stage_limit"]] if a.get("stage_limit") else stages
-            start = None if a.get("scratch") else prev_models(seed)       # scratch: pretrain this seed here
+            start = random_start(ctx, seed) if a.get("scratch") else prev_models(seed)   # scratch: no pretraining
             if final_unit(ctx, uid, seed, lam, out, a["deadline"], start=start, stages=stages,
                           adam_max=a.get("adam_max", ADAM_MAX), lbfgs_max=a.get("lbfgs_max", LBFGS_MAX),
                           tau=a.get("tau", TAU)) is None:
@@ -930,7 +930,7 @@ def _run_payloads(payloads: list, ctx: Ctx, deadline: float) -> None:
                     seed, stages, _ = unit_spec(uid, ctx.K)
                     stages = stages[:p["stage_limit"]] if p.get("stage_limit") else stages
                     if final_unit(ctx, uid, seed, p["lambda"], Path(p["out"]), deadline,
-                                  start=None if p.get("scratch") else prev_models(seed), stages=stages,
+                                  start=random_start(ctx, seed) if p.get("scratch") else prev_models(seed), stages=stages,
                                   adam_max=p.get("adam_max", ADAM_MAX), lbfgs_max=p.get("lbfgs_max", LBFGS_MAX),
                                   tau=p.get("tau", TAU)) is None:
                         return
@@ -958,6 +958,12 @@ def prev_path(seed: int) -> Path | None:
     """theta_prev of `seed`. r09: the final networks of the r08 run, one state per stage
     (handoff-e6/prev-r8-s<seed>.pt); r06-r08 used those of r05 (prev-s<seed>.pt)."""
     return _handoff_file(f"prev-r8-s{seed}.pt")
+
+
+def random_start(ctx: Ctx, seed: int) -> dict:
+    """No training at all: the seeded random initialisation of `seed` as the start of every stage (scratch control)."""
+    st = _cpu_state(new_model(ctx, seed))
+    return {j: st for j in range(ctx.K)}
 
 
 def prev_models(seed: int) -> dict | None:

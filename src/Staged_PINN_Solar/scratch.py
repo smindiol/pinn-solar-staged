@@ -5,11 +5,12 @@ from the previous run) or does the r09 recipe reach it from nothing? Nothing of 
 the same loss over I'' = physics terms + data + J (r09 Eq. 23), the same Eq. 12 centre and Optuna box, the same
 Adam -> L-BFGS phases. What changes is the start and the budget:
 
-  study  every lambda of I'' except lambda_data = 1 (the reference) re-tuned by Optuna, trials from theta_pre
-         (data-only pretraining from a random initialisation, seed 0), centre by Eq. 12 at theta_pre over I''.
+  study  every lambda of I'' except lambda_data = 1 (the reference) re-tuned by Optuna, trials from the random
+         initialisation of seed 0 (no pretraining at all, operator 2026-11-14), centre by Eq. 12 at that
+         initialisation over I''.
          Two independent parts (one account each, two GPU workers), TRIALS_PER_PART trials each; the parts are
          joined locally by `join_studies` (same objective, same box), best complete trial wins.
-  final  every seed pretrained here from a random initialisation, then per stage ADAM fixed Adam steps (no plateau
+  final  every seed from its random initialisation (no pretraining), then per stage ADAM fixed Adam steps (no plateau
          switch) and up to LBFGS L-BFGS evaluations: about the steps the r09 networks accumulated over
          r05, r06, r08 and r09 (each stopped Adam at ~150-270 steps and used ~430 L-BFGS evaluations).
          Seeds split over every GPU with e6.final_plan, as in r09 F.
@@ -31,7 +32,7 @@ from . import e6, steps, training, weights
 STUDY = "e6s"
 UNIT = "e6s-A-s"
 BEST = "best_lambda_s.json"
-PRE = "pretrained_s0.pt"
+PRE = "init_s0.pt"
 KEYS = training.TERMS + ("J",)
 TRIALS_PER_PART = 25            # two parts -> 50 trials
 ADAM, LBFGS, TAU = 1000, 1700, None      # TAU None: no plateau switch, all ADAM steps run
@@ -44,19 +45,15 @@ def journal_name(part: int) -> str:
 
 
 def theta_pre(ctx, out: Path, tel, deadline: float) -> tuple[dict, Path]:
-    """theta_pre of seed 0 (Eq. 18 alone, from a random initialisation): the handed-over copy when present,
-    pretrained here otherwise."""
-    p = e6._handoff_file(PRE) or e6._handoff_file("pretrained.pt")
-    if p is not None:
-        return torch.load(p, map_location="cpu", weights_only=False), p
-    pre = e6.pretrain(ctx, 0, ctx.K, tel, deadline)
+    """The start of the study: the random initialisation of seed 0 at every stage (no pretraining)."""
+    pre = e6.random_start(ctx, 0)
     p = out / PRE
     torch.save(pre, p)
     return pre, p
 
 
 def centre_all(ctx, pre: dict, seed: int = 0) -> dict:
-    """Eq. 12 at theta_pre over I'' (the r09 Eq. 24 rule extended to every term): lambda_hat per grid stage,
+    """Eq. 12 at the random initialisation over I'' (the r09 Eq. 24 rule extended to every term): lambda_hat per grid stage,
     rescaled so lambda_data = 1, geometric mean over GRID."""
     model = e6.new_model(ctx, seed)
     params = list(model.parameters())
@@ -78,7 +75,7 @@ def _study(ctx, part: int, out: Path, deadline: float, target: int, journal: Pat
     pre, pre_path = theta_pre(ctx, out, tel, deadline)
     journal = journal or out / journal_name(part)
     c = centre_all(ctx, pre, 0)
-    tel.line(f"Eq. 12 centre over I'' at theta_pre (lambda_data = 1): "
+    tel.line(f"Eq. 12 centre over I'' at the random init (lambda_data = 1): "
              f"{json.dumps({k: float(f'{v:.3e}') for k, v in c.items()})}")
     e6.open_study(journal, 0, create_centre=c, study_name=STUDY)
     if ctx.dev.type == "cuda":
@@ -120,11 +117,11 @@ def join_studies(summaries: list[dict]) -> dict:
     part, t = best
     lam = e6.full_lambda({k[6:]: 10.0 ** v for k, v in t["params"].items() if k.startswith("log10_")})
     return {"lambda": lam, "part": part, "trial": t["number"], "value": t["value"], **total,
-            "centre": summaries[0].get("centre"), "rule": "scratch study: Optuna over I'' from theta_pre"}
+            "centre": summaries[0].get("centre"), "rule": "scratch study: Optuna over I'' from the random initialisation"}
 
 
 def run_final(account: int) -> list:
-    """The scratch final runs of `account` (e6.final_plan with UNIT): every seed pretrained here, fixed ADAM Adam
+    """The scratch final runs of `account` (e6.final_plan with UNIT): every seed from its random init, fixed ADAM Adam
     steps then up to LBFGS L-BFGS evaluations per stage, lambda from best_lambda_s.json."""
     start = time.time()
     deadline = start + HOURS["final"] * 3600.0
@@ -147,7 +144,7 @@ def _history(out: Path, name: str) -> list:
 
 def run_smoke() -> dict:
     """Short check before the long kernels: a 2-trial study (one per GPU worker) and one heavy near-Voc stage per
-    GPU, each from scratch (pretraining included) with a cut Adam/L-BFGS budget. Projects the wall times."""
+    GPU, each from the random initialisation with a cut Adam/L-BFGS budget. Projects the wall times."""
     start = time.time()
     deadline = start + HOURS["smoke"] * 3600.0
     out = e6.results_dir() / "smoke-s"
