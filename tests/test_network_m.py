@@ -23,13 +23,13 @@ CPU = torch.device("cpu")
 
 
 # --- network size ------------------------------------------------------------------------------------------------
-def test_network_m_has_twelve_inputs_and_416003_parameters() -> None:
-    """S5: 320 x 5, n_in = 1 + 11 = 12, three outputs, same activation and ansatz ranges as A."""
+def test_network_m_has_twelve_inputs_and_267267_parameters() -> None:
+    """S5: 256 x 5 (A width, one layer more), n_in = 1 + 11 = 12, three outputs, same activation and ansatz ranges as A."""
     cfg = C.network_m()
-    assert (cfg.width, cfg.depth) == (320, 5) and len(data_m.XI_PARAMS) == 11
+    assert (cfg.width, cfg.depth) == (256, 5) and len(data_m.XI_PARAMS) == 11
     net = network.build("A", len(data_m.XI_PARAMS), cfg.width, cfg.depth, seed=0)
     assert net.nets[0][0].in_features == 12 and net.nets[0][-1].out_features == 3
-    assert sum(p.numel() for p in net.parameters()) == 416003
+    assert sum(p.numel() for p in net.parameters()) == 267267
     out = net(torch.rand(5, 1, dtype=torch.float64), torch.rand(5, 11, dtype=torch.float64))
     assert out.shape == (5, 3) and out[:, 1:].min() >= 0 and out[:, 1:].max() <= 1
 
@@ -153,8 +153,8 @@ def test_final_parts_split_the_k_stages_of_a_seed() -> None:
 
 
 def test_scratch_m_constants_follow_the_operator() -> None:
-    """S6 / S8 and the operator's 2026-11-14 change: one study of 25 trials capped at 10.5 h, grid 0..24 by 4."""
-    assert scratch_m.GRID == (0, 4, 8, 12, 16, 20, 24) and scratch_m.TRIALS == 25
+    """S6 / S8 and the operator's 2026-11-14 change: one study of 15 trials capped at 10.5 h, grid 0..24 by 4."""
+    assert scratch_m.GRID == (0, 4, 8, 12, 16, 20, 24) and scratch_m.TRIALS == 15
     assert scratch_m.HOURS == {"smoke": 20 / 60, "study": 10.5, "final": 10.5} and scratch_m.SEEDS == (0, 1, 2)
     assert (scratch_m.STUDY, scratch_m.UNIT, scratch_m.BEST, scratch_m.JOURNAL) == \
         ("e7m", "e7m-M-s", "best_lambda_m.json", "optuna_journal_m.log")
@@ -167,8 +167,8 @@ def test_smoke_verdict_projects_and_judges() -> None:
              trial_stage_seconds=300.0, s_per_adam=0.05, s_per_lbfgs_eval=0.1, stage_seconds=150.0, adam_steps=100,
              lbfgs_evaluations=50, study_peak_gb=4.0, final_peak_gb=5.0)
     v = scratch_m.smoke_verdict([w, w], s_pre_step=0.01, centre_stage_s=10.0, K=25, n_grid=7)
-    # study: pretrain 25*500*0.01 s + 7*10 s + ceil(25/2) * 7 * 300 s
-    assert v["projected_study_hours"] == pytest.approx((125.0 + 70.0 + 13 * 2100.0) / 3600.0)
+    # study: pretrain 25*500*0.01 s + 7*10 s + ceil(TRIALS/2) * 7 * 300 s
+    assert v["projected_study_hours"] == pytest.approx((125.0 + 70.0 + 8 * 2100.0) / 3600.0)
     assert v["pass"] and v["peak_gb"] == 5.0
     assert not scratch_m.smoke_verdict([{**w, "final_peak_gb": 13.5}], s_pre_step=0.01, centre_stage_s=10.0,
                                        K=25, n_grid=7)["pass"]
@@ -305,3 +305,47 @@ def test_spawned_worker_lines_are_flushed(capsys, monkeypatch):
     monkeypatch.setattr(builtins, "print", lambda *a, **k: (seen.append(k.get("flush")), real(*a, **k)))
     e6._flush_print("[gpu0] stage 1/29")
     assert seen == [True]
+
+
+def test_final_payloads_split_adam_and_lbfgs(tmp_path) -> None:
+    """Operator 2026-11-14: the final is split, Adam in one kernel and L-BFGS in another from the Adam-end models."""
+    lam = {"J": 1.0}
+    a = scratch_m.final_payloads(0, 2, "adam", lam, tmp_path, 1.0)
+    assert [p["units"] for p in a] == [["e7m-Madam-s0.p0of2"], ["e7m-Madam-s0.p1of2"]]
+    assert all(p["adam_max"] == scratch_m.ADAM and p["lbfgs_max"] == 0 and "start_file" not in p for p in a)
+    f = tmp_path / "e7m-Madam-s0.models.pt"
+    b = scratch_m.final_payloads(0, 2, "lbfgs", lam, tmp_path, 1.0, f)
+    assert [p["units"] for p in b] == [["e7m-M-s0.p0of2"], ["e7m-M-s0.p1of2"]]
+    assert all(p["adam_max"] == 0 and p["lbfgs_max"] == scratch_m.LBFGS and p["start_file"] == str(f)
+               and p["start_key"] == "final" for p in b)
+    with pytest.raises(FileNotFoundError):
+        scratch_m.final_payloads(0, 2, "lbfgs", lam, tmp_path, 1.0)
+    with pytest.raises(ValueError):
+        scratch_m.final_payloads(0, 2, "both", lam, tmp_path, 1.0)
+
+
+@needs_base_b
+def test_split_final_runs_adam_then_lbfgs_on_a_tiny_cpu_context(tmp_path, monkeypatch) -> None:
+    """The Adam half runs no L-BFGS and writes the merged Adam-end models; the L-BFGS half starts every stage from
+    them, runs no Adam step and does not raise the loss."""
+    import json
+    monkeypatch.setenv("STAGED_PINN_RESULTS", str(tmp_path))
+    monkeypatch.setenv("STAGED_PINN_DEVICE", "cpu")
+    cfg = C.network_m().with_(width=16, depth=2, n_devices_per_batch=3, n_nodes_per_device=8, max_stages=2)
+    real = scratch_m.build_ctx
+    monkeypatch.setattr(scratch_m, "build_ctx", lambda: real(cfg, limit=3, root=data_m.local_root()))
+    monkeypatch.setattr(scratch_m, "ADAM", 6)
+    monkeypatch.setattr(scratch_m, "LBFGS", 4)
+    monkeypatch.setattr(e6, "PRE_STEPS", 3)
+    out = scratch_m.results_dir()
+    out.mkdir(parents=True, exist_ok=True)
+    (out / scratch_m.BEST).write_text(json.dumps({"lambda": e6.full_lambda({k: 1.0 for k in scratch_m.KEYS})}))
+    assert scratch_m.run_final_seed(0, parts=1, phase="adam") == ["e7m-Madam-s0.p0of1"]
+    ra = json.loads((out / "e7m-Madam-s0.json").read_text())
+    assert all(r["adam_steps"] == 6 and r["lbfgs_evaluations"] == 0 for r in ra["stage_progress"])
+    assert scratch_m.run_final_seed(0, parts=1, phase="lbfgs") == ["e7m-M-s0.p0of1"]
+    rb = json.loads((out / "e7m-M-s0.json").read_text())
+    for r, q in zip(sorted(rb["stage_progress"], key=lambda r: r["stage"]),
+                    sorted(ra["stage_progress"], key=lambda r: r["stage"])):
+        assert r["adam_steps"] == 0 and r["lbfgs_evaluations"] >= 1
+        assert r["loss_start"] == pytest.approx(q["loss_end"], rel=1e-9) and r["loss_end"] <= r["loss_start"]

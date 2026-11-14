@@ -789,7 +789,8 @@ def final_unit(ctx: Ctx, uid: str, seed: int, lam: dict, out: Path, deadline: fl
         adam_state = _cpu_state(model)
         f_adam = float(obj.terms_and_grad(lam, params)[0])
         # --- phase 3: L-BFGS on the same objective and the same lambda ---
-        lb = torch.optim.LBFGS(params, lr=1.0, max_iter=lbfgs_max, history_size=LBFGS_HISTORY,
+        # lbfgs_max 0: an Adam-only run (E7 split final); torch LBFGS with max_iter 0 would not stop
+        lb = None if lbfgs_max <= 0 else torch.optim.LBFGS(params, lr=1.0, max_iter=lbfgs_max, history_size=LBFGS_HISTORY,
                                line_search_fn="strong_wolfe", tolerance_grad=1e-12, tolerance_change=1e-15)
         n_eval = {"k": 0}
 
@@ -806,11 +807,13 @@ def final_unit(ctx: Ctx, uid: str, seed: int, lam: dict, out: Path, deadline: fl
             return total
 
         try:
-            lb.step(closure)
+            if lb is not None:
+                lb.step(closure)
         except RuntimeError as e:
             tel.line(f"stage {j}: L-BFGS raised {e!r}")
-        f_lb = float(obj.terms_and_grad(lam, params)[0])
-        lb_iters = int(lb.state[lb._params[0]].get("n_iter", 0)) if lb._params and lb._params[0] in lb.state else 0
+        f_lb = float(obj.terms_and_grad(lam, params)[0]) if lb is not None else f_adam
+        lb_iters = (int(lb.state[lb._params[0]].get("n_iter", 0))
+                    if lb is not None and lb._params and lb._params[0] in lb.state else 0)
         reverted = not math.isfinite(f_lb) or f_lb > f_adam
         if reverted:
             model.load_state_dict(adam_state)
@@ -984,7 +987,10 @@ def _scratch_start(payload: dict, seed: int) -> dict | None:
     """Scratch control: None makes final_unit pretrain `seed` from its random initialisation (theta_pre, Eq. 18
     alone); a payload `start_file` (the smoke) reuses a pretrained network instead."""
     p = payload.get("start_file")
-    return torch.load(p, map_location="cpu", weights_only=False) if p else None
+    if not p:
+        return None
+    st = torch.load(p, map_location="cpu", weights_only=False)
+    return st[payload["start_key"]] if payload.get("start_key") else st   # "final": per-stage Adam-end models
 
 
 def prev_models(seed: int) -> dict | None:

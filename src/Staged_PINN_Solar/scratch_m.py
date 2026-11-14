@@ -1,6 +1,6 @@
 """Experiment E7 (protocol v10): network M on base B, with the scratch recipe of `scratch.py` unchanged.
 
-Network M (r11): the ansatz of Eq. 3 around a 320 x 5 perceptron whose input is x_hat plus the 11 parameters of
+Network M: the ansatz of Eq. 3 around a 256 x 5 perceptron (A's width, one layer more) whose input is x_hat plus the 11 parameters of
 Eq. 25 (`data_m.XI_PARAMS`), per-device material in every residual, in the current of Eq. 20 and in evaluation
 (S2), sigma_i^2 measured on the base-B training split (S7). Stage j trains on the devices with n_V > j and
 K = max n_V over the training split (r11 Eq. 27). Everything else is `e6` / `scratch` as is: theta_pre on Eq. 18
@@ -13,8 +13,10 @@ evaluations from theta_pre of that stage.
          an explicit PASS / FAIL.
   study  (`run_study`) ONE account, both GPU workers on ONE journal, stopping at TRIALS trials or the cap
          (operator 2026-11-14).
-  final  (`run_final_seed`) one seed per kernel, its K stages split over the kernel's GPUs (stage j in part
-         j mod n), then merged; seeds 0, 1, 2.
+  final  (`run_final_seed`) split in two kernels per seed (operator 2026-11-14): phase "adam" pretrains and runs
+         ADAM Adam steps per stage, writing <UNIT_ADAM><seed>.models.pt; phase "lbfgs" starts every stage from
+         that file and runs up to LBFGS L-BFGS evaluations with the same loss and lambda. Each kernel splits the
+         K stages over its GPUs (stage j in part j mod n) and merges; seeds 0, 1, 2.
 """
 from __future__ import annotations
 
@@ -35,7 +37,7 @@ __provenance__ = {
     "sections": ["5", "6"],
     "equations": ["12", "18", "20", "23", "26", "27"],
     "invariants": [
-        "network_m_has_twelve_inputs_and_416003_parameters",
+        "network_m_has_twelve_inputs_and_267267_parameters",
         "stage_eligibility_excludes_devices_whose_curve_ends_before_the_stage",
         "final_parts_split_the_k_stages_of_a_seed",
     ],
@@ -43,12 +45,13 @@ __provenance__ = {
 
 STUDY = "e7m"
 UNIT = "e7m-M-s"
+UNIT_ADAM = "e7m-Madam-s"             # Adam-only half of the split final
 BEST = "best_lambda_m.json"
 JOURNAL = "optuna_journal_m.log"
 PRETRAINED = "pretrained_m.pt"
 KEYS = training.TERMS + ("J",)
 GRID = (0, 4, 8, 12, 16, 20, 24)        # S6: study trial grid
-TRIALS = 25                             # operator 2026-11-14: one study, 25 trials, 10.5 h at most
+TRIALS = 15                             # operator 2026-11-14: one study, 15 trials, 10.5 h at most
 ADAM, LBFGS, TAU = 2000, 500, None      # TAU None: no plateau switch, all ADAM steps run
 HOURS = {"smoke": 20 / 60, "study": 10.5, "final": 10.5}
 SEEDS = (0, 1, 2)
@@ -188,14 +191,28 @@ def join_studies(summaries: list[dict]) -> dict:
             "centre": summaries[0].get("centre"), "rule": "E7 network M: Optuna over I'' from theta_pre (r11 Eq. 26)"}
 
 
-def final_units(seed: int, parts: int) -> list:
+def final_units(seed: int, parts: int, unit: str = UNIT) -> list:
     """The units of one seed split into `parts` (stage j in part j mod parts, `e6.unit_spec`)."""
-    return [f"{UNIT}{seed}.p{p}of{parts}" for p in range(parts)]
+    return [f"{unit}{seed}.p{p}of{parts}" for p in range(parts)]
 
 
-def run_final_seed(seed: int = 0, parts: int | None = None) -> list:
-    """One seed of the final on one kernel: its K stages split over the kernel's GPUs (default: one part per GPU),
-    each part pretraining the seed (Eq. 18 alone) and then ADAM + LBFGS per stage with best_lambda_m.json; merged."""
+def final_payloads(seed: int, parts: int, phase: str, lam: dict, out: Path, deadline: float,
+                   adam_file: Path | None = None) -> list:
+    """Payloads of one half of the split final. "adam": theta_pre then ADAM Adam steps per stage, no L-BFGS.
+    "lbfgs": no Adam, up to LBFGS evaluations per stage from the per-stage Adam-end models of `adam_file`."""
+    base = dict(role="final", **{"lambda": lam}, out=str(out), deadline=deadline, scratch=True, tau=TAU)
+    if phase == "adam":
+        return [{**base, "units": [u], "adam_max": ADAM, "lbfgs_max": 0} for u in final_units(seed, parts, UNIT_ADAM)]
+    if phase == "lbfgs":
+        if adam_file is None:
+            raise FileNotFoundError(f"{UNIT_ADAM}{seed}.models.pt is needed for the L-BFGS half")
+        return [{**base, "units": [u], "adam_max": 0, "lbfgs_max": LBFGS, "start_file": str(adam_file),
+                 "start_key": "final"} for u in final_units(seed, parts)]
+    raise ValueError(f"phase {phase!r}: 'adam' or 'lbfgs'")
+
+
+def run_final_seed(seed: int = 0, parts: int | None = None, phase: str = "adam") -> list:
+    """One half of one seed of the final on one kernel, its stages split over the kernel's GPUs, then merged."""
     start = time.time()
     deadline = start + HOURS["final"] * 3600.0
     out = results_dir()
@@ -204,12 +221,14 @@ def run_final_seed(seed: int = 0, parts: int | None = None) -> list:
     if p is None:
         raise FileNotFoundError(f"{BEST} is neither in Results/e7m nor in handoff-e6/")
     lam = json.loads(p.read_text())["lambda"]
+    adam_file = _file(f"{UNIT_ADAM}{seed}.models.pt", out) if phase == "lbfgs" else None
     ctx = build_ctx()
-    units = final_units(seed, parts or max(e6._n_gpu(), 1))
-    e6._run_payloads([{"role": "final", "units": [u], "lambda": lam, "out": str(out), "deadline": deadline,
-                       "scratch": True, "adam_max": ADAM, "lbfgs_max": LBFGS, "tau": TAU} for u in units], ctx, deadline)
-    e6.merge_parts(out, ctx.prep, f"{UNIT}{seed}")
-    return [u for u in units if steps.is_complete(out / f"{u}.json")]
+    n = parts or max(e6._n_gpu(), 1)
+    pays = final_payloads(seed, n, phase, lam, out, deadline, adam_file)
+    e6._run_payloads(pays, ctx, deadline)
+    unit = UNIT_ADAM if phase == "adam" else UNIT
+    e6.merge_parts(out, ctx.prep, f"{unit}{seed}")
+    return [u for q in pays for u in q["units"] if steps.is_complete(out / f"{u}.json")]
 
 
 # --- smoke ------------------------------------------------------------------------------------------------------
