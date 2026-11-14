@@ -283,3 +283,25 @@ def test_e7m_notebooks_bind_the_repository_and_call_the_entry_points() -> None:
         c = cells(name)
         assert c[0]["source"] == cells("verification")[0]["source"]
         assert call in "".join(c[-1]["source"])
+
+
+def test_study_progress_line_counts_trials_and_eta():
+    """The live study line reports finished trials of TRIALS, the best value and an ETA from the mean trial time."""
+    from Staged_PINN_Solar import scratch_m
+    s = {"complete": 4, "pruned": 1, "failed": 0, "running_or_lost": 2, "best_value": -1.5}
+    line = scratch_m.study_progress_line(s, elapsed=5 * 3600.0, remaining=100 * 3600.0)
+    assert f"5/{scratch_m.TRIALS} finished" in line
+    assert "best -1.5" in line
+    assert f"ETA {(scratch_m.TRIALS - 5):.2f} h" in line
+    assert "ETA -" in scratch_m.study_progress_line({}, elapsed=10.0, remaining=10.0)
+
+
+def test_spawned_worker_lines_are_flushed(capsys, monkeypatch):
+    """Lines relayed from GPU workers are printed with flush, so the Kaggle log shows them live."""
+    import builtins
+    from Staged_PINN_Solar import e6
+    seen = []
+    real = builtins.print
+    monkeypatch.setattr(builtins, "print", lambda *a, **k: (seen.append(k.get("flush")), real(*a, **k)))
+    e6._flush_print("[gpu0] stage 1/29")
+    assert seen == [True]

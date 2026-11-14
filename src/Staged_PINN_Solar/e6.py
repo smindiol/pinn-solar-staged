@@ -895,7 +895,11 @@ def _worker(payload: str) -> None:
                 break
 
 
-def _spawn(payloads: list, deadline: float, report=print) -> None:
+def _flush_print(line: str) -> None:
+    print(line, flush=True)
+
+
+def _spawn(payloads: list, deadline: float, report=_flush_print) -> None:
     """One worker process per payload (payload i on GPU i), restarted if it dies while the budget allows."""
     src = str(Path(__file__).resolve().parents[1])
 

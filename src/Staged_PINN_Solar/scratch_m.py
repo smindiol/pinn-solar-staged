@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import math
+import threading
 import time
 from pathlib import Path
 
@@ -112,6 +113,28 @@ def _grid(ctx) -> tuple:
     return tuple(j for j in GRID if j < ctx.K)
 
 
+def study_progress_line(s: dict, elapsed: float, remaining: float) -> str:
+    """One live progress line of the study: finished trials of TRIALS, best value, elapsed time and ETA."""
+    done = int(s.get("complete", 0)) + int(s.get("pruned", 0)) + int(s.get("failed", 0))
+    eta = elapsed / done * max(TRIALS - done, 0) if done else float("nan")
+    eta = min(eta, remaining) if done else eta
+    best = s.get("best_value")
+    return (f"[e7m study] {done}/{TRIALS} finished (complete {s.get('complete', 0)} · pruned {s.get('pruned', 0)} · "
+            f"failed {s.get('failed', 0)} · running {s.get('running_or_lost', 0)}) · best "
+            f"{'-' if best is None else f'{best:.4g}'} · {elapsed / 3600:.2f} h elapsed · ETA "
+            f"{'-' if eta != eta else f'{eta / 3600:.2f} h'}")
+
+
+def _watch_study(journal, t0: float, deadline: float, stop, every: float = 120.0) -> None:
+    """Print the study's progress every `every` seconds until `stop` is set (live Kaggle log)."""
+    while not stop.wait(every):
+        try:
+            s = e6.study_summary(journal, STUDY)
+            print(study_progress_line(s, time.time() - t0, deadline - time.time()), flush=True)
+        except Exception as e:  # noqa: BLE001  (a progress line must never stop the study)
+            print(f"[e7m study] progress unavailable: {e!r}", flush=True)
+
+
 def run_study() -> dict:
     """The study on ONE account: theta_pre, the Eq. 26 centre, then both GPU workers on ONE journal until TRIALS
     trials or HOURS["study"]. Writes study-m.json and, when a trial completed, best_lambda_m.json."""
@@ -130,9 +153,14 @@ def run_study() -> dict:
     if ctx.dev.type == "cuda":
         torch.cuda.empty_cache()
     n = min(max(e6._n_gpu(), 1), 2)
+    stop = threading.Event()
+    watch = threading.Thread(target=_watch_study, args=(journal, time.time(), deadline, stop), daemon=True)
+    watch.start()
     e6._run_payloads([{"role": "tune", "worker": 10 + w, "start": str(pre_path), "journal": str(journal),
                        "out": str(out), "deadline": deadline, "study": STUDY, "keys": list(KEYS), "target": TRIALS,
                        "grid": list(_grid(ctx))} for w in range(n)], ctx, deadline)
+    stop.set()
+    watch.join(timeout=5)
     s = e6.study_summary(journal, STUDY)
     s.update(part=0, centre=c, created=steps._now(), pretrained=str(pre_path), hours=(time.time() - start) / 3600.0)
     steps._write(out / "study-m.json", s)
