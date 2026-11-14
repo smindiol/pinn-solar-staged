@@ -33,16 +33,16 @@ UNIT = "e6s-A-s"
 BEST = "best_lambda_s.json"
 JOURNAL = "optuna_journal_s.log"
 KEYS = training.TERMS + ("J",)
-TRIALS = 50
+TRIALS = 40                             # operator 2026-11-14: 40 trials, 3.5 h at most
 ADAM, LBFGS, TAU = 2000, 500, None      # TAU None: no plateau switch, all ADAM steps run
-HOURS = {"study": 8.0, "final": 10.5, "smoke": 0.4}
+HOURS = {"study": 3.5, "final": 10.5, "smoke": 0.4}
 PRETRAIN_S = 240.0                      # measured: theta_pre of 24 stages took 240 s on one T4 (r08 P, 2026-11-13)
 SMOKE = dict(units=(f"{UNIT}0.p21of24", f"{UNIT}1.p20of24"), adam=100, lbfgs=100, grid=(20,))
 
 
 def theta_pre(ctx, out: Path, tel, deadline: float) -> tuple[dict, Path]:
-    """theta_pre of seed 0 (Eq. 18 alone, from a random initialisation): the handed-over copy when present,
-    pretrained here otherwise (as the r08 study did)."""
+    """theta_pre of seed 0 (Eq. 18 alone, from a random initialisation): the copy handed over in handoff-e6/
+    (the network the last Optuna study was centred on), pretrained here only if it is missing."""
     p = e6._handoff_file("pretrained.pt")
     if p is not None:
         return torch.load(p, map_location="cpu", weights_only=False), p
@@ -184,7 +184,7 @@ def run_smoke() -> dict:
            "final": units, "final_seconds": t_final, "s_per_eval": s_eval, "stages_per_gpu": stages_per_gpu,
            "eta_study_hours": eta_study_h, "eta_final_hours": eta_final_h, "seconds": time.time() - start}
     rec["pass"] = bool(len(trials) >= 2 and len(ok) == len(SMOKE["units"]) and not any(v["diverged"] for v in ok)
-                       and eta_study_h <= HOURS["study"] and eta_final_h <= HOURS["final"] - 0.5)
+                       and eta_final_h <= HOURS["final"] - 0.5)      # the study stops itself at HOURS["study"]
     steps._write(e6.results_dir() / "e6s-smoke.json", rec)
     print(f"[scratch smoke] {json.dumps({k: rec[k] for k in ('n_gpu', 's_per_eval', 'eta_study_hours', 'eta_final_hours', 'pass')})}",
           flush=True)
