@@ -128,7 +128,7 @@ def study_progress_line(s: dict, elapsed: float, remaining: float) -> str:
             f"{'-' if eta != eta else f'{eta / 3600:.2f} h'}")
 
 
-def _watch_study(journal, t0: float, deadline: float, stop, every: float = 120.0) -> None:
+def _watch_study(journal, t0: float, deadline: float, stop, every: float = 60.0) -> None:
     """Print the study's progress every `every` seconds until `stop` is set (live Kaggle log)."""
     while not stop.wait(every):
         try:

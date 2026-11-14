@@ -52,6 +52,7 @@ __provenance__ = {
 # run (one per seed and stage, handed over as handoff-e6/prev-s<seed>.pt).
 
 # --- the parameters table of E6 (experiments v04) ---------------------------------------------------------
+TRIAL_EVERY = 50            # live progress line every TRIAL_EVERY trial steps
 PRE_STEPS = 500             # pretraining Adam steps per stage
 LR0, LR_END = 1e-4, 5e-6    # Adam, cosine from LR0 to LR_END (r08: low rate, every start is an already trained network)
 CLIP = 1.0                  # gradient-norm clip
@@ -530,7 +531,10 @@ def run_trial(ctx: Ctx, start: dict, lam: dict, seed: int, deadline: float, tria
     model = new_model(ctx, seed)
     params = list(model.parameters())
     vals = []
-    for i, j in enumerate(grid or GRID):
+    g_stages = list(grid or GRID)
+    t_trial = time.time()
+    tag = f"trial {trial.number}" if trial is not None else "trial"
+    for i, j in enumerate(g_stages):
         if time.time() > deadline:
             raise TimeoutError("deadline inside a trial")
         model.load_state_dict(start[j])
@@ -545,6 +549,11 @@ def run_trial(ctx: Ctx, start: dict, lam: dict, seed: int, deadline: float, tria
             torch.nn.utils.clip_grad_norm_(params, CLIP)
             opt.step()
             sched.step()
+            if tel is not None and (s % TRIAL_EVERY == 0 or s == TRIAL_STEPS - 1):
+                frac = (i + (s + 1) / TRIAL_STEPS) / len(g_stages)
+                left = (time.time() - t_trial) / frac * (1.0 - frac)
+                tel.line(f"{tag} · stage {i + 1}/{len(g_stages)} (V idx {j}) · step {s + 1}/{TRIAL_STEPS} · "
+                         f"loss {float(total):.3e} · trial ETA {left / 60:.1f} min")
         e = current_error(ctx, model, "val", j)
         if not math.isfinite(e):
             return PENALTY
