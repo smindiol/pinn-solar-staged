@@ -151,3 +151,26 @@ def test_base_m_root_prefers_env_then_kaggle_input_then_workspace(tmp_path, monk
     assert data_m.default_root() == found
     monkeypatch.setenv("DPV_BASE_M", str(tmp_path / "elsewhere"))
     assert data_m.default_root() == tmp_path / "elsewhere"
+
+
+def test_ensure_dataset_tries_each_private_owner_copy(tmp_path, monkeypatch):
+    """A kernel reads only its own account's private copy: the owners are tried in order until one downloads."""
+    import sys
+    import types
+
+    calls = []
+
+    def fake_download(slug, path):
+        calls.append(slug)
+        if not slug.startswith("macrosomindiola/"):
+            raise PermissionError("403")
+        (tmp_path / path).write_text("x")
+        return str(tmp_path / path)
+
+    monkeypatch.setitem(sys.modules, "kagglehub", types.SimpleNamespace(dataset_download=fake_download))
+    monkeypatch.delenv("DPV_BASE_M_DATASET", raising=False)
+    monkeypatch.delenv("DPV_BASE_M", raising=False)
+    got = data_m.ensure_dataset(root=tmp_path / "empty")
+    assert got == tmp_path
+    assert calls == ["sebastianmindiola/dpv-pinn-base-m", "sgarizado/dpv-pinn-base-m",
+                     "macrosomindiola/dpv-pinn-base-m", "macrosomindiola/dpv-pinn-base-m"]

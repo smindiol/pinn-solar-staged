@@ -51,6 +51,10 @@ __provenance__ = {
 }
 
 BASE_M_DATASET = "sgarizado/dpv-pinn-base-m"       # Kaggle dataset of the bundle (base_m.h5 + split_m.csv)
+#: The bundle is a private dataset, readable only by its owner's kernels: every account that runs an M job holds
+#: its own copy under the same name, and a kernel tries the owners in this order until one download succeeds.
+BASE_M_OWNERS = ("sebastianmindiola", "sgarizado", "macrosomindiola", "tianmindiola")
+BASE_M_NAME = "dpv-pinn-base-m"
 SPLIT_FILE = "split_m.csv"
 BUNDLE_FILE = "base_m.h5"
 MATERIALS = ("E1gen", "InP", "CdTe", "Si")
@@ -96,19 +100,30 @@ def default_root() -> Path:
     return found if found is not None else local_root()
 
 
-def ensure_dataset(slug: str = BASE_M_DATASET, root=None) -> Path:
-    """The root, downloading the bundle (base_m.h5, split_m.csv) with kagglehub when `default_root()` lacks it."""
+def ensure_dataset(slug: str | None = None, root=None) -> Path:
+    """The root, downloading the bundle (base_m.h5, split_m.csv) with kagglehub when `default_root()` lacks it.
+    Without `slug`, env DPV_BASE_M_DATASET, else `<owner>/dpv-pinn-base-m` for each owner of BASE_M_OWNERS in turn
+    (a private copy is visible only to its own account's kernels)."""
     root = Path(root) if root else default_root()
     if _has_files(root):
         return root
     os.environ["DISABLE_KAGGLE_CACHE"] = "1"
     import kagglehub
 
-    got = None
-    for name in (SPLIT_FILE, BUNDLE_FILE):
-        got = Path(kagglehub.dataset_download(slug, path=name)).parent
-    os.environ["DPV_BASE_M"] = str(got)
-    return got
+    env = os.environ.get("DPV_BASE_M_DATASET")
+    slugs = [slug] if slug else [env] if env else [f"{o}/{BASE_M_NAME}" for o in BASE_M_OWNERS]
+    errors = []
+    for s in slugs:
+        try:
+            got = None
+            for name in (SPLIT_FILE, BUNDLE_FILE):
+                got = Path(kagglehub.dataset_download(s, path=name)).parent
+            print(f"[data_m] base B bundle from {s} -> {got}", flush=True)
+            os.environ["DPV_BASE_M"] = str(got)
+            return got
+        except Exception as e:  # noqa: BLE001  (an account without its copy: try the next owner)
+            errors.append(f"{s}: {type(e).__name__}: {e}"[:300])
+    raise RuntimeError("no readable copy of the base B bundle: " + " | ".join(errors))
 
 
 @dataclass(frozen=True)
