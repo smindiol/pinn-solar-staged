@@ -500,11 +500,11 @@ def _storage(journal: Path):
         return JournalStorage(JournalFileStorage(str(journal)))
 
 
-def open_study(journal: Path, worker: int = 0, create_centre: dict | None = None):
+def open_study(journal: Path, worker: int = 0, create_centre: dict | None = None, study_name: str | None = None):
     import optuna
     sampler = optuna.samplers.TPESampler(seed=TPE_SEED + worker, n_startup_trials=TPE_STARTUP)
     pruner = optuna.pruners.MedianPruner(n_startup_trials=TPE_STARTUP, n_warmup_steps=1)
-    study = optuna.create_study(study_name=STUDY, storage=_storage(journal), direction="minimize",
+    study = optuna.create_study(study_name=study_name or STUDY, storage=_storage(journal), direction="minimize",
                                 sampler=sampler, pruner=pruner, load_if_exists=True)
     if create_centre is not None and "centre" not in study.user_attrs:
         study.set_user_attr("centre", create_centre)
@@ -512,10 +512,11 @@ def open_study(journal: Path, worker: int = 0, create_centre: dict | None = None
 
 
 def full_lambda(phys: dict) -> dict:
-    return {**{k: float(phys[k]) for k in training.TERMS}, "data": LAMBDA_DATA}
+    return {**{k: float(v) for k, v in phys.items()}, "data": LAMBDA_DATA}
 
 
-def run_trial(ctx: Ctx, start: dict, lam: dict, seed: int, deadline: float, trial=None, tel=None) -> float:
+def run_trial(ctx: Ctx, start: dict, lam: dict, seed: int, deadline: float, trial=None, tel=None,
+              with_j: bool = False) -> float:
     """theta_T(lambda): per grid stage, TRIAL_STEPS Adam steps from theta_prev of that stage (r06); the objective
     is the mean validation current error of r06 Eq. 13 over the stages done, reported after each stage to the
     pruner. The study minimizes log10 of that mean: a monotone transform, so the argmin of Eq. 13, TPE's
@@ -529,7 +530,8 @@ def run_trial(ctx: Ctx, start: dict, lam: dict, seed: int, deadline: float, tria
         if time.time() > deadline:
             raise TimeoutError("deadline inside a trial")
         model.load_state_dict(start[j])
-        obj = PhasedObjective(ctx, model, physics_batch(ctx, j, seed), j)
+        obj = PhasedObjective(ctx, model, physics_batch(ctx, j, seed), j,
+                              jbatch=current_batch(ctx, j, seed) if with_j else None)
         opt, sched = _adam(params, TRIAL_STEPS)
         for s in range(TRIAL_STEPS):
             total, _, g = obj.terms_and_grad(lam, params)
@@ -553,22 +555,29 @@ def run_trial(ctx: Ctx, start: dict, lam: dict, seed: int, deadline: float, tria
     return float(np.log10(np.mean(vals)))
 
 
-def tune_loop(ctx: Ctx, start: dict, journal: Path, worker: int, deadline: float, tel: Telemetry) -> None:
+def tune_loop(ctx: Ctx, start: dict, journal: Path, worker: int, deadline: float, tel: Telemetry,
+              study_name: str | None = None, keys: tuple | None = None, target: int | None = None) -> None:
+    """`keys` (default the physics terms) are searched in the box around the study's centre; "J" in `keys` adds
+    the current term to every trial's loss. `target` stops the worker once the study holds that many trials."""
     import optuna
     from optuna.trial import TrialState
-    study = open_study(journal, worker)
+    study = open_study(journal, worker, study_name=study_name)
     c = study.user_attrs["centre"]
+    keys = tuple(keys or training.TERMS)
     longest = 0.0
     while True:
         if time.time() + 1.05 * longest > deadline:
             tel.line(f"wall budget: no room for another trial (longest {longest:.0f}s); stopping")
             return
+        if target is not None and len(study.get_trials(deepcopy=False)) >= target:
+            tel.line(f"study holds {target} trials; stopping")
+            return
         trial = study.ask()
         lam = full_lambda({k: 10.0 ** trial.suggest_float(f"log10_{k}", math.log10(c[k]) - BOX_DECADES,
-                                                          math.log10(c[k]) + BOX_DECADES) for k in training.TERMS})
+                                                          math.log10(c[k]) + BOX_DECADES) for k in keys})
         t = time.time()
         try:
-            value = run_trial(ctx, start, lam, 0, deadline, trial, tel)
+            value = run_trial(ctx, start, lam, 0, deadline, trial, tel, with_j="J" in keys)
             study.tell(trial, value)
             state = "complete" if value < PENALTY else "diverged"
         except optuna.TrialPruned:
@@ -590,9 +599,9 @@ def tune_loop(ctx: Ctx, start: dict, journal: Path, worker: int, deadline: float
         tel.plot()
 
 
-def study_summary(journal: Path) -> dict:
+def study_summary(journal: Path, study_name: str | None = None) -> dict:
     from optuna.trial import TrialState
-    study = open_study(journal)
+    study = open_study(journal, study_name=study_name)
     trials = study.get_trials(deepcopy=False)
     count = lambda s: sum(t.state == s for t in trials)
     out = {"n_trials": len(trials), "complete": count(TrialState.COMPLETE), "pruned": count(TrialState.PRUNED),
@@ -604,7 +613,7 @@ def study_summary(journal: Path) -> dict:
     if done:
         b = min(done, key=lambda t: t.value)
         out.update(best_trial=b.number, best_value=b.value,
-                   best_lambda=full_lambda({k: 10.0 ** b.params[f"log10_{k}"] for k in training.TERMS}))
+                   best_lambda=full_lambda({k[6:]: 10.0 ** v for k, v in b.params.items() if k.startswith("log10_")}))
     return out
 
 
@@ -625,7 +634,7 @@ def unit_spec(uid: str, K: int) -> tuple:
     return int(m["seed"]), [j for j in range(K) if j % n == p], m["base"]
 
 
-def final_plan(seeds: int = 5, accounts: int = 4, gpus: int = 2) -> list:
+def final_plan(seeds: int = 5, accounts: int = 4, gpus: int = 2, unit: str | None = None) -> list:
     """v09 F split (operator 2026-11-14: no idle GPU). Account a runs seed a split over its GPUs, and the seeds
     left over (a >= accounts) are split over every GPU of every account, so all GPUs carry the same load
     (5 seeds, 4 accounts x 2 T4: 12 + 3 = 15 stages per GPU). Returns, per account, one pack per GPU."""
@@ -635,8 +644,8 @@ def final_plan(seeds: int = 5, accounts: int = 4, gpus: int = 2) -> list:
     for a in range(accounts):
         packs = []
         for g in range(gpus):
-            pack = [f"{UNIT}{a}.p{g}of{gpus}"] if a < seeds else []
-            pack += [f"{UNIT}{s}.p{a * gpus + g}of{total}" for s in extra]
+            pack = [f"{unit or UNIT}{a}.p{g}of{gpus}"] if a < seeds else []
+            pack += [f"{unit or UNIT}{s}.p{a * gpus + g}of{total}" for s in extra]
             packs.append(pack)
         plan.append(packs)
     return plan
@@ -681,7 +690,8 @@ def merge_parts(out: Path, prep, base: str) -> dict | None:
 
 def final_unit(ctx: Ctx, uid: str, seed: int, lam: dict, out: Path, deadline: float, n_stages: int | None = None,
                adam_max: int = ADAM_MAX, lbfgs_max: int = LBFGS_MAX, start: dict | None = None,
-               stages: list | None = None) -> dict | None:
+               stages: list | None = None, tau: float | None = TAU) -> dict | None:
+    # tau None: Adam runs all adam_max steps (no plateau switch; scratch control of r09)
     """One seed: pretraining, then per stage Adam -> L-BFGS from theta_pre of that stage with the same loss and the
     same lambda. Resumable from `<uid>.ckpt.pt` (per stage, and every 15 min inside Adam). Returns the record, or
     None when the wall budget stopped it (checkpoint and partial record on disk)."""
@@ -758,7 +768,7 @@ def final_unit(ctx: Ctx, uid: str, seed: int, lam: dict, out: Path, deadline: fl
                 frac = (pos + (s + 1) / (adam_max + lbfgs_max)) / Kp
                 eta = tel.progress(frac, phase="adam", stage=j, step=s)
                 tel.line(f"stage {j + 1}/{K} · adam {s}/{adam_max} · loss {f:.3e} · ETA {eta}")
-            if len(losses) > WINDOW and (losses[-WINDOW - 1] - losses[-1]) / abs(losses[-WINDOW - 1]) < TAU:
+            if tau is not None and len(losses) > WINDOW and (losses[-WINDOW - 1] - losses[-1]) / abs(losses[-WINDOW - 1]) < tau:
                 switched = s
                 break
             if time.time() - last_ck > CKPT_SECONDS:
@@ -830,12 +840,13 @@ def final_unit(ctx: Ctx, uid: str, seed: int, lam: dict, out: Path, deadline: fl
     np.save(out / f"{uid}.jtest.npy", st["J_test"])
     rec = {"unit": uid, "step": "e6", "complete": True, "created": steps._now(), "seed": seed,
            "config": ctx.cfg.to_dict(), "lambda": lam, "loss_mode": LOSS_MODE, "sigma2": ctx.sigma2,
-           "recipe": {"pre_steps": PRE_STEPS, "adam_max": adam_max, "tau": TAU, "window": WINDOW,
+           "recipe": {"pre_steps": PRE_STEPS, "adam_max": adam_max, "tau": tau, "window": WINDOW,
                       "lbfgs_max": lbfgs_max, "lbfgs_history": LBFGS_HISTORY, "lr": [LR0, LR_END], "clip": CLIP},
            "stages": stages, "stages_planned_total": K,
            "stages_done": done, "stages_planned": Kp, "diverged": st["diverged"], "stage_progress": st["rows"],
            "per_device_error": errs, "seconds": seconds,
-           "gpu_hours": seconds / 3600.0 if dev.type == "cuda" else 0.0, "device": str(dev)}
+           "gpu_hours": seconds / 3600.0 if dev.type == "cuda" else 0.0, "device": str(dev),
+           "peak_mem_gb": torch.cuda.max_memory_allocated(dev) / 1e9 if dev.type == "cuda" else None}
     steps._write(out / f"{uid}.json", rec)
     (out / f"{uid}.partial.json").unlink(missing_ok=True)
     ckpt.unlink(missing_ok=True)
@@ -853,7 +864,8 @@ def _worker(payload: str) -> None:
     out = Path(a["out"])
     if a["role"] == "tune":
         start = torch.load(a["start"], map_location="cpu", weights_only=False)
-        tune_loop(ctx, start, Path(a["journal"]), a["worker"], a["deadline"], Telemetry(out, f"tune-w{a['worker']}"))
+        tune_loop(ctx, start, Path(a["journal"]), a["worker"], a["deadline"], Telemetry(out, f"tune-w{a['worker']}"),
+                  study_name=a.get("study"), keys=a.get("keys"), target=a.get("target"))
     else:
         lam = a["lambda"]
         for uid in a["units"]:
@@ -862,8 +874,10 @@ def _worker(payload: str) -> None:
                 continue
             seed, stages, _ = unit_spec(uid, ctx.K)
             stages = stages[:a["stage_limit"]] if a.get("stage_limit") else stages
-            if final_unit(ctx, uid, seed, lam, out, a["deadline"], start=prev_models(seed), stages=stages,
-                          adam_max=a.get("adam_max", ADAM_MAX), lbfgs_max=a.get("lbfgs_max", LBFGS_MAX)) is None:
+            start = None if a.get("scratch") else prev_models(seed)       # scratch: pretrain this seed here
+            if final_unit(ctx, uid, seed, lam, out, a["deadline"], start=start, stages=stages,
+                          adam_max=a.get("adam_max", ADAM_MAX), lbfgs_max=a.get("lbfgs_max", LBFGS_MAX),
+                          tau=a.get("tau", TAU)) is None:
                 break
 
 
@@ -908,13 +922,17 @@ def _run_payloads(payloads: list, ctx: Ctx, deadline: float) -> None:
     for p in payloads:                     # one device: the payloads run here, one after the other
         if p["role"] == "tune":
             start = torch.load(p["start"], map_location="cpu", weights_only=False)
-            tune_loop(ctx, start, Path(p["journal"]), p["worker"], deadline, Telemetry(Path(p["out"]), f"tune-w{p['worker']}"))
+            tune_loop(ctx, start, Path(p["journal"]), p["worker"], deadline, Telemetry(Path(p["out"]), f"tune-w{p['worker']}"),
+                      study_name=p.get("study"), keys=p.get("keys"), target=p.get("target"))
         else:
             for uid in p["units"]:
                 if not steps.is_complete(Path(p["out"]) / f"{uid}.json"):
                     seed, stages, _ = unit_spec(uid, ctx.K)
+                    stages = stages[:p["stage_limit"]] if p.get("stage_limit") else stages
                     if final_unit(ctx, uid, seed, p["lambda"], Path(p["out"]), deadline,
-                                  start=prev_models(seed), stages=stages) is None:
+                                  start=None if p.get("scratch") else prev_models(seed), stages=stages,
+                                  adam_max=p.get("adam_max", ADAM_MAX), lbfgs_max=p.get("lbfgs_max", LBFGS_MAX),
+                                  tau=p.get("tau", TAU)) is None:
                         return
 
 

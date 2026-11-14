@@ -151,3 +151,51 @@ def test_final_unit_trains_only_its_stages_and_resumes_by_stage(ctx, tmp_path, m
     assert sorted(torch.load(tmp_path / f"{uid}.models.pt", weights_only=False)["final"]) == [1]
     jt = np.load(tmp_path / f"{uid}.jtest.npy")
     assert np.isfinite(jt[:, 1]).all() and np.isnan(jt[:, [0, 2]]).all()
+
+
+def test_scratch_centre_covers_every_term_and_join_picks_the_best_complete_trial(ctx, monkeypatch) -> None:
+    from Staged_PINN_Solar import scratch
+
+    def pb(c, j, seed):
+        idx = np.tile(np.arange(4), (2, 1))
+        b = training._gather(c.prep.train, np.array([0, 1]), idx, c.dev)
+        b["target"] = torch.zeros(b["x"].shape[0], 3, dtype=torch.float64)
+        return b
+    monkeypatch.setattr(e6, "physics_batch", pb)
+    monkeypatch.setattr(e6, "GRID", (0, 1))
+    ctx.sigma2 = {**ctx.sigma2, "data": 1.0}
+    model = e6.new_model(ctx, 0)
+    pre = {j: e6._cpu_state(model) for j in range(ctx.K)}
+    c = scratch.centre_all(ctx, pre, 0)
+    assert set(c) == set(scratch.KEYS) and "J" in c and all(np.isfinite(v) and v > 0 for v in c.values())
+    trial = lambda n, st, v, j: {"number": n, "state": st, "value": v, "params": {"log10_J": j, "log10_pde_phi": 0.0}}
+    s0 = {"part": 0, "n_trials": 2, "complete": 1, "pruned": 1, "failed": 0, "centre": c,
+          "trials": [trial(0, "COMPLETE", -1.0, 0.0), trial(1, "PRUNED", None, 1.0)]}
+    s1 = {"part": 1, "n_trials": 1, "complete": 1, "pruned": 0, "failed": 0,
+          "trials": [trial(0, "COMPLETE", -2.0, 1.0)]}
+    j = scratch.join_studies([s0, s1])
+    assert (j["part"], j["trial"], j["value"], j["n_trials"]) == (1, 0, -2.0, 3)
+    assert j["lambda"]["J"] == pytest.approx(10.0) and j["lambda"]["data"] == e6.LAMBDA_DATA
+    plan = e6.final_plan(unit=scratch.UNIT)
+    assert all(u.startswith(scratch.UNIT) for packs in plan for p in packs for u in p)
+
+
+def test_scratch_final_unit_pretrains_from_nothing_and_runs_fixed_adam(ctx, tmp_path, monkeypatch) -> None:
+    def pb(c, j, seed):
+        idx = np.tile(np.arange(4), (2, 1))
+        b = training._gather(c.prep.train, np.array([0, 1]), idx, c.dev)
+        b["target"] = torch.zeros(b["x"].shape[0], 3, dtype=torch.float64)
+        return b
+    monkeypatch.setattr(e6, "physics_batch", pb)
+    monkeypatch.setattr(e6, "stage_batch", lambda c, split, j, rng, nd, nn: pb(c, j, 0))
+    monkeypatch.setattr(e6, "field_error", lambda *a, **k: 0.0)
+    monkeypatch.setattr(e6, "PRE_STEPS", 3)
+    monkeypatch.setattr(e6, "WINDOW", 2)
+    ctx.sigma2 = {**ctx.sigma2, "data": 1.0}
+    lam = {**{k: 1.0 for k in e6.TERMS}, "J": 1.0}
+    uid = "e6s-A-s0.p0of3"
+    seed, stages, _ = e6.unit_spec(uid, ctx.K)
+    rec = e6.final_unit(ctx, uid, seed, lam, tmp_path, time.time() + 600, adam_max=8, lbfgs_max=2,
+                        start=None, stages=stages, tau=None)
+    assert rec["stage_progress"][0]["adam_steps"] == 8 and rec["recipe"]["tau"] is None
+    assert sorted(torch.load(tmp_path / f"{uid}.models.pt", weights_only=False)["final"]) == stages
