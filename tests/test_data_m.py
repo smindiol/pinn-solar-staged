@@ -138,7 +138,8 @@ def test_base_m_bundle_reproduces_the_devices(rows, refs, tmp_path) -> None:
 def test_base_m_root_prefers_env_then_kaggle_input_then_workspace(tmp_path, monkeypatch) -> None:
     """The data root: env DPV_BASE_M, else a directory under /kaggle/input with split_m.csv and the devices, else
     the workspace's dpv-dataset/base_b. The Kaggle slug is the declared constant."""
-    assert data_m.BASE_M_DATASET == "sgarizado/dpv-pinn-base-m"
+    assert data_m.BASE_M_DATASET == "sebastianmindiola/dpv-pinn-base-m"
+    assert data_m.BASE_M_OWNERS[0] == "sebastianmindiola"
     kaggle = tmp_path / "kaggle" / "input"
     monkeypatch.setattr(data, "KAGGLE_INPUT", kaggle)
     monkeypatch.delenv("DPV_BASE_M", raising=False)

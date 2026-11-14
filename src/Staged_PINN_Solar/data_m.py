@@ -50,9 +50,8 @@ __provenance__ = {
     ],
 }
 
-BASE_M_DATASET = "sgarizado/dpv-pinn-base-m"       # Kaggle dataset of the bundle (base_m.h5 + split_m.csv)
-#: The bundle is a private dataset, readable only by its owner's kernels: every account that runs an M job holds
-#: its own copy under the same name, and a kernel tries the owners in this order until one download succeeds.
+BASE_M_DATASET = "sebastianmindiola/dpv-pinn-base-m"   # public Kaggle dataset of the bundle (base_m.h5 + split_m.csv)
+#: Owners tried in order: the public copy first (readable from every account), then any private per-account copy.
 BASE_M_OWNERS = ("sebastianmindiola", "sgarizado", "macrosomindiola", "tianmindiola")
 BASE_M_NAME = "dpv-pinn-base-m"
 SPLIT_FILE = "split_m.csv"
