@@ -861,7 +861,9 @@ def _worker(payload: str) -> None:
                 print(f"[{uid}] complete, skipped", flush=True)
                 continue
             seed, stages, _ = unit_spec(uid, ctx.K)
-            if final_unit(ctx, uid, seed, lam, out, a["deadline"], start=prev_models(seed), stages=stages) is None:
+            stages = stages[:a["stage_limit"]] if a.get("stage_limit") else stages
+            if final_unit(ctx, uid, seed, lam, out, a["deadline"], start=prev_models(seed), stages=stages,
+                          adam_max=a.get("adam_max", ADAM_MAX), lbfgs_max=a.get("lbfgs_max", LBFGS_MAX)) is None:
                 break
 
 
@@ -1122,6 +1124,51 @@ def run_f(units: list | None = None, account: int | None = None) -> list:
     for base in sorted({unit_spec(u, ctx.K)[2] for p in packs for u in p if ".p" in u}):
         merge_parts(out, ctx.prep, base)
     return [u for p in packs for u in p if steps.is_complete(out / f"{u}.json")]
+
+
+def run_fcheck(account: int = 1, stage_limit: int = 2, adam_max: int = 50, lbfgs_max: int = 20,
+               hours: float = 0.4) -> dict:
+    """Short Kaggle check of the v09 F split (operator 2026-11-14): the packs of `account` from final_plan(),
+    one per GPU, each part cut to its first `stage_limit` stages with few optimizer steps; then the split seed
+    is merged. Writes e6r9-fcheck.json: GPUs seen, units completed, and the merged stages."""
+    start = time.time()
+    deadline = start + hours * 3600.0
+    out = results_dir() / "fcheck"
+    out.mkdir(parents=True, exist_ok=True)
+    # plumbing check: the r09 lambda when it was handed off, else r08's with lambda_J = 1 (the values are not judged)
+    lam = _lambda_star() if _handoff_file(BEST) is not None else {**_lambda_file(BEST_R08), "J": 1.0}
+    packs = final_plan()[account]
+    ctx = build_ctx()
+    lines = []
+
+    def report(line):
+        lines.append(line)
+        print(line, flush=True)
+
+    payloads = [{"role": "final", "units": p, "lambda": lam, "out": str(out), "deadline": deadline,
+                 "stage_limit": stage_limit, "adam_max": adam_max, "lbfgs_max": lbfgs_max} for p in packs]
+    if _n_gpu() >= 2:
+        path = _save_ctx(ctx)
+        for p in payloads:
+            p["ctx"] = path
+        _spawn(payloads, deadline, report=report)
+    else:
+        _run_payloads(payloads, ctx, deadline)
+    units = {u: steps.is_complete(out / f"{u}.json") for p in packs for u in p}
+    merged = {}
+    for base in sorted({unit_spec(u, ctx.K)[2] for p in packs for u in p}):
+        rec = merge_parts(out, ctx.prep, base)
+        merged[base] = None if rec is None else {"stages_done": rec["stages_done"],
+                                                 "stages": [r["stage"] for r in rec["stage_progress"]]}
+    gpus_seen = sorted({l.split("]")[0][1:] for l in lines if l.startswith("[gpu")})
+    rec = {"unit": "e6r9-fcheck", "complete": True, "created": steps._now(), "account": account,
+           "n_gpu": _n_gpu(), "gpus_seen": gpus_seen, "packs": packs, "units_complete": units, "merged": merged,
+           "seconds": time.time() - start,
+           "pass": _n_gpu() >= 2 and len(gpus_seen) == 2 and all(units.values())}
+    steps._write(results_dir() / "e6r9-fcheck.json", rec)
+    print(f"[fcheck] {json.dumps({k: rec[k] for k in ('n_gpu', 'gpus_seen', 'units_complete', 'merged', 'pass')})}",
+          flush=True)
+    return rec
 
 
 def run_from_environment(stage: str):
