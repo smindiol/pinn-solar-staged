@@ -35,7 +35,7 @@ import numpy as np
 import torch
 
 from . import ansatz as ansatz_mod
-from . import data, diagnostics, pce, steps, training, weights
+from . import carriers, data, diagnostics, pce, steps, training, weights
 from .config import Config
 from .units import UnitSpec
 
@@ -43,7 +43,7 @@ __provenance__ = {
     "revision": "experiments-protocolo-experimental-de-la-pinn-por-etapas-sobre-dpv-v04.md",
     "sections": ["E6"],
     "experiments": ["E6"],
-    "equations": [12, 13, 18, 19, 20, 21],
+    "equations": [12, 13, 18, 19, 20, 21, 22, 23, 24],
     "invariants": [],
 }
 # r06 (proposal): Eq. 13 scores a trial by the terminal-current error (normalized by J_sc) instead of the field
@@ -68,16 +68,19 @@ SMOKE = dict(stages=3, adam_max=100, lbfgs_max=50)
 EVERY = 25                  # history / progress line every EVERY steps
 GRAD_EVERY = 100            # per-term gradient norms every GRAD_EVERY Adam steps (6 backward passes each)
 CKPT_SECONDS = 15 * 60
-BUDGET_HOURS = {"p": 2.2, "q": 2.2, "h": 0.15, "f": 10.5}   # h: smoke capped at 9 min (operator, 2026-11-13)
+BUDGET_HOURS = {"p": 2.2, "q": 2.2, "h": 0.4, "f": 10.5}    # h: paired smoke capped at 25 min (operator, 2026-11-14)
 
 PRE_DEVICES, PRE_NODES = 64, 32   # data batch of one pretraining step (same size as the physics batch of E1)
 LOSS_MODE = "relative"            # per-node relative residual (r04 Eq. 10), the control arm of E1
 TERMS = training.TERMS + ("data",)
 JUNCTION_HALF_WIDTH, EDGE_WIDTH = 0.05, 0.02   # node sampling: every node within these x_hat windows, the rest uniform
-STUDY = "e6r8"                    # r08: no new study; lambda recentred from r05 (best_lambda_r08.json)
+STUDY = "e6r9"                    # r09: no study; r08 weights + lambda_J by Eq. 24 (best_lambda_r09.json)
 JOURNAL = "optuna_journal_r08.log"
-BEST = "best_lambda_r08.json"
-UNIT = "e6r8-A-s"                 # final units of r08; r07 units were e6r7-A-s<seed>, r05 units e6-A-s<seed>
+BEST = "best_lambda_r09.json"
+BEST_R08 = "best_lambda_r08.json"
+UNIT = "e6r9-A-s"                 # final units of r09; r08 units were e6r8-A-s<seed>, r05 units e6-A-s<seed>
+J_DEVICES = 16                    # D_J: training devices per stage on their full mesh for the current term
+SMOKE9 = dict(stages=(0, 1, 10, 19, 20, 21), adam=200, judged=(0, 1, 19, 20, 21))   # v09 paired smoke
 
 
 def results_dir() -> Path:
@@ -132,7 +135,7 @@ def build_ctx(cfg: Config | None = None, report=print) -> Ctx:
     prep = training.prepare(None, cfg)
     K = min(int(prep.train.n_V.max()), cfg.max_voltages, cfg.max_stages or 10 ** 9)
     fields = {s: _fields(prep.refs[s], K) for s in ("train", "val", "test")}
-    currents = {s: _currents(prep.refs[s], K, prep.scales) for s in ("val", "test")}
+    currents = {s: _currents(prep.refs[s], K, prep.scales) for s in ("train", "val", "test")}
     report(f"[e6] data ready: {len(prep.train)}/{len(prep.val)}/{len(prep.test)} devices, {K} stages, "
            f"{time.time() - t0:.0f}s")
     return Ctx(prep, fields, cfg, K, currents)
@@ -211,24 +214,69 @@ def data_loss(model, b: dict, V_tilde: float, scale: torch.Tensor) -> torch.Tens
     return (((pred - b["target"]) / scale) ** 2).sum(dim=1).mean()
 
 
-class PhasedObjective(training.Objective):
-    """Eq. 11 of r05 over I' = I u {data}: E1's relative residual terms plus the data term on the same batch."""
+def current_batch(ctx: Ctx, stage: int, seed: int, n_dev: int = None) -> dict:
+    """D_J of r09 Eq. 23: `n_dev` training devices whose curve reaches `stage`, on their FULL dPV mesh (Eq. 20 is
+    a quadrature over every node), with the dPV current at the stage voltage and the dPV short-circuit current.
+    A function of (seed, stage): fixed during the stage, so L-BFGS sees one objective."""
+    bank = ctx.prep.train
+    n_dev = n_dev or J_DEVICES
+    eligible = np.nonzero(bank.n_V > stage)[0]
+    rng = np.random.default_rng([int(seed), int(stage), 23])
+    pick = np.sort(rng.choice(eligible, size=min(n_dev, eligible.size), replace=False))
+    N = bank.x_hat.shape[1]
+    t = lambda a: training._t(np.asarray(a, dtype=np.float64), ctx.dev)
+    ref = ctx.currents["train"][pick]
+    return {"x": t(bank.x_hat[pick].reshape(-1, 1)), "xi": t(np.repeat(bank.xi_hat[pick], N, axis=0)),
+            "peq0": t(np.repeat(bank.phi_eq0[pick], N)[:, None]), "peq1": t(np.repeat(bank.phi_eq1[pick], N)[:, None]),
+            "G": t(bank.G[pick]), "x_hat": t(bank.x_hat[pick]), "delta": t(bank.delta[pick]),
+            "J_ref": t(ref[:, stage]), "J_sc": t(ref[:, 0]), "n": int(pick.size), "N": int(N), "devices": pick}
 
-    def __init__(self, ctx: Ctx, model, batch: dict, stage: int) -> None:
+
+def gr_current_torch(model, cb: dict, V_tilde: float, ctx: Ctx) -> torch.Tensor:
+    """Eq. 20 of r07 with its graph (r09 Eq. 23 differentiates it): J_0 [ (1/delta) int (G - R) dx_hat
+    - S_n1 (n(1) - n_eq(1)) - S_p0 (p(0) - p_eq(0)) ] per device [A/cm^2]. Same quadrature as `training.gr_current`."""
+    m, contacts, scales = ctx.prep.material, data.device_contacts(ctx.prep.scales), ctx.prep.scales
+    phi, phi_n, phi_p = model(cb["x"], cb["xi"], cb["peq0"], cb["peq1"], V_tilde)
+    shape = lambda a: a.reshape(cb["n"], cb["N"])
+    phi, phi_n, phi_p = shape(phi), shape(phi_n), shape(phi_p)
+    mm = m.like(phi)
+    n, p = carriers.electron_density(phi, phi_n, mm), carriers.hole_density(phi, phi_p, mm)
+    n_eq, p_eq = carriers.equilibrium_densities(phi, mm)
+    f = cb["G"] - carriers.recombination(n, p, mm)
+    integral = (0.5 * (f[:, 1:] + f[:, :-1]) * (cb["x_hat"][:, 1:] - cb["x_hat"][:, :-1])).sum(dim=1)
+    j = integral / cb["delta"] - contacts.S_n1 * (n[:, -1] - n_eq[:, -1]) - contacts.S_p0 * (p[:, 0] - p_eq[:, 0])
+    return scales.J0 * j
+
+
+def current_loss(model, cb: dict, V_tilde: float, ctx: Ctx) -> torch.Tensor:
+    """r09 Eq. 23: < ((J_GR(V_j; theta) - J_dPV(V_j)) / J_sc_dPV)^2 > over D_J."""
+    return (((gr_current_torch(model, cb, V_tilde, ctx) - cb["J_ref"]) / cb["J_sc"]) ** 2).mean()
+
+
+class PhasedObjective(training.Objective):
+    """Eq. 11 of r05 over I' = I u {data}: E1's relative residual terms plus the data term on the same batch.
+    With `jbatch` (r09), also the current term of Eq. 23 over I'' = I' u {J}, on its own full-mesh devices."""
+
+    def __init__(self, ctx: Ctx, model, batch: dict, stage: int, jbatch: dict | None = None) -> None:
         super().__init__(model, batch, ctx.V(stage), ctx.sigma2, ctx.prep.material, ctx.prep.contacts,
                          mode=LOSS_MODE)
-        self.scale = ctx.scale
+        self.scale, self.ctx, self.jbatch = ctx.scale, ctx, jbatch
 
     def _chunk_losses(self, b: dict) -> tuple:
         L, n = super()._chunk_losses(b)
         L["data"] = data_loss(self.model, b, self.V, self.scale)
         n["data"] = int(b["x"].shape[0])
+        if self.jbatch is not None:
+            L["J"] = current_loss(self.model, self.jbatch, self.V, self.ctx)
+            n["J"] = 1
         return L, n
 
     def _counts(self) -> list:
         out = super()._counts()
         for c, b in zip(out, self.chunks):
             c["data"] = int(b["x"].shape[0])
+            if self.jbatch is not None:
+                c["J"] = 1
         return out
 
     def terms_and_grad(self, lam: dict, params: list) -> tuple:
@@ -322,7 +370,7 @@ def plot_history(history: Path, png: Path) -> None:
     x = np.arange(len(steps_))
     if steps_:
         ax[0, 0].semilogy(x, [r["total"] for r in steps_], "k", lw=1.2, label="total")
-        for k in TERMS:
+        for k in TERMS + ("J",):
             ax[0, 0].semilogy(x, [r["terms"].get(k, np.nan) for r in steps_], lw=0.8, label=k)
         for i, r in enumerate(steps_):
             if i and r.get("phase") != steps_[i - 1].get("phase"):
@@ -333,7 +381,7 @@ def plot_history(history: Path, png: Path) -> None:
         ax[1, 0].set_title("learning rate (Adam)")
     g = [r for r in recs if "grad_norms" in r]
     if g:
-        for k in TERMS:
+        for k in TERMS + ("J",):
             ax[0, 1].semilogy([r["grad_norms"].get(k, np.nan) for r in g], ".-", lw=0.8, label=k)
         ax[0, 1].set_title("weighted gradient norm per term")
         ax[0, 1].legend(fontsize=7)
@@ -421,6 +469,22 @@ def centre(ctx: Ctx, pre: dict, seed: int) -> dict:
         for k in logs:
             logs[k].append(math.log10(lh[k] / lh["data"]))
     return {k: 10.0 ** float(np.mean(v)) for k, v in logs.items()}
+
+
+def centre_current(ctx: Ctx, prev: dict, seed: int = 0) -> float:
+    """r09 Eq. 24: the Eq. 12 rule for the current term at theta_prev^r08 over I'' (reference: the largest
+    gradient of any term), rescaled so lambda_data = 1 like `centre`, geometric mean over GRID."""
+    model = new_model(ctx, seed)
+    params = list(model.parameters())
+    logs = []
+    for j in GRID:
+        if j not in prev:
+            continue
+        model.load_state_dict(prev[j])
+        obj = PhasedObjective(ctx, model, physics_batch(ctx, j, seed), j, jbatch=current_batch(ctx, j, seed))
+        lh = weights.lambda_hat(obj.term_grads(params), "max", ctx.cfg.eps_g, ctx.cfg.lambda_min, ctx.cfg.lambda_max)
+        logs.append(math.log10(lh["J"] / lh["data"]))
+    return 10.0 ** float(np.mean(logs))
 
 
 # --- the Optuna study -------------------------------------------------------------------------------------
@@ -581,7 +645,9 @@ def final_unit(ctx: Ctx, uid: str, seed: int, lam: dict, out: Path, deadline: fl
             return None
         ts = time.time()
         model.load_state_dict(st["pre"][j])
-        obj = PhasedObjective(ctx, model, physics_batch(ctx, j, seed), j)
+        # r09: the current term of Eq. 23 enters exactly when its weight is in lambda (best_lambda_r09.json)
+        obj = PhasedObjective(ctx, model, physics_batch(ctx, j, seed), j,
+                              jbatch=current_batch(ctx, j, seed) if "J" in lam else None)
         g0 = obj.term_grads(params)
         shares = diagnostics.gradient_shares(g0, lam)
         loss0 = float(obj.terms_and_grad(lam, params)[0])
@@ -790,8 +856,9 @@ def _handoff_file(name: str) -> Path | None:
 
 
 def prev_path(seed: int) -> Path | None:
-    """theta_prev of `seed`: the final networks of the r05 run, one state per stage (handoff-e6/prev-s<seed>.pt)."""
-    return _handoff_file(f"prev-s{seed}.pt")
+    """theta_prev of `seed`. r09: the final networks of the r08 run, one state per stage
+    (handoff-e6/prev-r8-s<seed>.pt); r06-r08 used those of r05 (prev-s<seed>.pt)."""
+    return _handoff_file(f"prev-r8-s{seed}.pt")
 
 
 def prev_models(seed: int) -> dict | None:
@@ -866,32 +933,105 @@ def _close_study(out: Path, journal: Path, stage: str, start: float) -> dict:
     return s
 
 
-def _lambda_star() -> dict:
-    p = _handoff_file(BEST)
+def _lambda_file(name: str) -> dict:
+    p = _handoff_file(name)
     if p is None:
-        raise FileNotFoundError(f"{BEST} is neither in Results/e6 nor in handoff-e6/")
+        raise FileNotFoundError(f"{name} is neither in Results/e6 nor in handoff-e6/")
     return json.loads(p.read_text())["lambda"]
 
 
-def run_h() -> dict | None:
-    """The single smoke run of the final recipe: seed 0, stages 0-2, 100 Adam steps and 50 L-BFGS iterations."""
+def _lambda_star() -> dict:
+    return _lambda_file(BEST)
+
+
+def smoke_arm(ctx: Ctx, arm: str, lam: dict, out: Path, deadline: float, seed: int = 0) -> dict:
+    """v09 paired smoke, one arm: from theta_prev^r08 of `seed`, SMOKE9["adam"] Adam steps on each stage of
+    SMOKE9["stages"] (no L-BFGS), with the r09 loss when "J" is in `lam` (arm "r09") or the r08 loss ("ctl").
+    Before and after each stage: validation current error (r07 Eq. 13 form, Eq. 20 current) and field error."""
+    prev = prev_models(seed)
+    tel = Telemetry(out, f"e6r9-smoke-{arm}")
+    model = new_model(ctx, seed)
+    params = list(model.parameters())
+    rows = []
+    for j in SMOKE9["stages"]:
+        if time.time() > deadline - 60:
+            tel.line(f"wall budget: stopping before stage {j}")
+            break
+        ts = time.time()
+        model.load_state_dict(prev[j])
+        before = {"current": current_error(ctx, model, "val", j), "field": field_error(ctx, model, "val", j)}
+        obj = PhasedObjective(ctx, model, physics_batch(ctx, j, seed), j,
+                              jbatch=current_batch(ctx, j, seed) if "J" in lam else None)
+        opt, sched = _adam(params, SMOKE9["adam"])
+        loss0, diverged = None, False
+        for s in range(SMOKE9["adam"]):
+            total, terms, g = obj.terms_and_grad(lam, params)
+            f = float(total)
+            loss0 = f if loss0 is None else loss0
+            if not math.isfinite(f) or f > ctx.cfg.divergence_factor * max(loss0, 1e-300):
+                diverged = True
+                break
+            _apply(params, g)
+            torch.nn.utils.clip_grad_norm_(params, CLIP)
+            opt.step()
+            sched.step()
+            if s % EVERY == 0:
+                tel.log(phase="adam", stage=j, step=s, total=f, terms=terms, lr=sched.get_last_lr()[0])
+        after = {"current": current_error(ctx, model, "val", j), "field": field_error(ctx, model, "val", j)}
+        rows.append({"stage": j, "V": j * ctx.cfg.voltage_step, "before": before, "after": after,
+                     "diverged": diverged, "seconds": time.time() - ts})
+        tel.line(f"[{arm}] stage {j}: current err {before['current']:.3e} -> {after['current']:.3e} · "
+                 f"field err {before['field']:.3e} -> {after['field']:.3e}{' DIVERGED' if diverged else ''} · "
+                 f"{rows[-1]['seconds']:.0f}s")
+    rec = {"unit": f"e6r9-smoke-{arm}", "step": "e6", "complete": True, "created": steps._now(), "arm": arm,
+           "seed": seed, "lambda": lam, "smoke": SMOKE9, "rows": rows}
+    steps._write(out / f"e6r9-smoke-{arm}.json", rec)
+    return rec
+
+
+def smoke_verdict(r09: dict, ctl: dict) -> dict:
+    """The v09 pass rule: over SMOKE9["judged"], mean validation current error after the steps at least 20 %
+    lower in r09 than in the control, mean field error of r09 at most 20 % above the control's, no divergence."""
+    pick = lambda rec, key: [r["after"][key] for r in rec["rows"] if r["stage"] in SMOKE9["judged"]]
+    cur9, curc = float(np.mean(pick(r09, "current"))), float(np.mean(pick(ctl, "current")))
+    fld9, fldc = float(np.mean(pick(r09, "field"))), float(np.mean(pick(ctl, "field")))
+    div = any(r["diverged"] for r in r09["rows"] + ctl["rows"])
+    ok = (len(pick(r09, "current")) == len(SMOKE9["judged"]) == len(pick(ctl, "current"))
+          and cur9 <= 0.8 * curc and fld9 <= 1.2 * fldc and not div)
+    return {"current_r09": cur9, "current_ctl": curc, "field_r09": fld9, "field_ctl": fldc, "diverged": div,
+            "pass": bool(ok)}
+
+
+def run_h(arm: str | None = None) -> dict:
+    """The v09 smoke, one arm per kernel: `arm` "r09" or "ctl" (or FORGE_RUN_UNITS ["arm:..."]; default r09)."""
     start = time.time()
     deadline = _deadline("h", start)
     out = results_dir()
+    out.mkdir(parents=True, exist_ok=True)
+    arm = arm or next((str(t)[4:] for t in _tokens() if str(t).startswith("arm:")), "r09")
     ctx = build_ctx()
-    return final_unit(ctx, f"{UNIT[:-2]}-smoke-s0", 0, _lambda_star(), out, deadline, n_stages=SMOKE["stages"],
-                      adam_max=SMOKE["adam_max"], lbfgs_max=SMOKE["lbfgs_max"], start=prev_models(0))
+    if arm == "r09":
+        if _handoff_file(BEST) is None:     # Eq. 24 once, on the GPU (the operator's PC has none); handed off to F
+            lam = dict(_lambda_file(BEST_R08))
+            lam["J"] = centre_current(ctx, prev_models(0), 0)
+            steps._write(out / BEST, {"lambda": lam, "rule": "r09 Eq. 24 at theta_prev^r08 seed 0, GRID stages",
+                                      "lambda_r08": _lambda_file(BEST_R08)})
+            print(f"[e6h] Eq. 24: lambda_J = {lam['J']:.4e}", flush=True)
+        lam = _lambda_star()
+    else:
+        lam = _lambda_file(BEST_R08)
+    return smoke_arm(ctx, arm, lam, out, deadline)
 
 
-def run_f() -> list:
+def run_f(units: list | None = None) -> list:
     """The final runs: `pack@<h>h:e6-A-s0+e6-A-s1+e6-A-s2` tokens, one pack per GPU."""
     start = time.time()
     deadline = _deadline("f", start)
     out = results_dir()
     lam = _lambda_star()
     packs = []
-    default = [f"pack@10.5h:{UNIT}0+{UNIT}1+{UNIT}2", f"pack@10.5h:{UNIT}3+{UNIT}4"]   # 3 seeds on GPU 0, 2 on GPU 1
-    for tok in _tokens() or default:
+    default = [f"pack@10.5h:{UNIT}0", f"pack@10.5h:{UNIT}1"]   # v09: one seed per GPU; other accounts pass their own
+    for tok in ([f"pack@10.5h:{u}" for u in units] if units else None) or _tokens() or default:
         m = steps._PACK.match(str(tok))
         packs.append(m.group(2).split("+") if m else [str(tok)])
     ctx = build_ctx()
