@@ -23,6 +23,7 @@ import json
 import math
 import os
 import pickle
+import re
 import shutil
 import subprocess
 import sys
@@ -608,8 +609,79 @@ def study_summary(journal: Path) -> dict:
 
 
 # --- the final recipe -----------------------------------------------------------------------------------
+_PART = re.compile(r"^(?P<base>.+-s(?P<seed>\d+))(?:\.p(?P<p>\d+)of(?P<n>\d+))?$")
+
+
+def unit_spec(uid: str, K: int) -> tuple:
+    """`e6r9-A-s4` -> (4, all stages, "e6r9-A-s4"); `e6r9-A-s4.p3of8` -> (4, [3, 11, 19], "e6r9-A-s4").
+    r09 starts every stage from theta_prev^r08 of that stage, so the stages of one seed are independent and a
+    seed can be split across GPUs; interleaving (j mod n) spreads the slow near-Voc stages over the parts."""
+    m = _PART.match(uid)
+    if m is None:
+        raise ValueError(f"unit id {uid!r} names no seed")
+    p, n = (int(m["p"]), int(m["n"])) if m["p"] is not None else (0, 1)
+    if not 0 <= p < n:
+        raise ValueError(f"unit id {uid!r}: part {p} of {n}")
+    return int(m["seed"]), [j for j in range(K) if j % n == p], m["base"]
+
+
+def final_plan(seeds: int = 5, accounts: int = 4, gpus: int = 2) -> list:
+    """v09 F split (operator 2026-11-14: no idle GPU). Account a runs seed a split over its GPUs, and the seeds
+    left over (a >= accounts) are split over every GPU of every account, so all GPUs carry the same load
+    (5 seeds, 4 accounts x 2 T4: 12 + 3 = 15 stages per GPU). Returns, per account, one pack per GPU."""
+    total = accounts * gpus
+    extra = list(range(accounts, seeds))
+    plan = []
+    for a in range(accounts):
+        packs = []
+        for g in range(gpus):
+            pack = [f"{UNIT}{a}.p{g}of{gpus}"] if a < seeds else []
+            pack += [f"{UNIT}{s}.p{a * gpus + g}of{total}" for s in extra]
+            packs.append(pack)
+        plan.append(packs)
+    return plan
+
+
+def merge_parts(out: Path, prep, base: str) -> dict | None:
+    """Join the complete parts `<base>.pXofN` of one seed into `<base>.json` and `<base>.models.pt`, the same
+    files an unsplit unit writes, with the PCE error computed on the joined curve. None while a part is missing."""
+    recs = [json.loads(p.read_text()) for p in sorted(out.glob(f"{base}.p*of*.json"))]
+    recs = [r for r in recs if r.get("complete")]
+    if not recs:
+        return None
+    n = int(_PART.match(recs[0]["unit"])["n"])
+    if sorted(int(_PART.match(r["unit"])["p"]) for r in recs) != list(range(n)):
+        return None
+    K = recs[0]["stages_planned_total"]
+    J = np.full((len(prep.test), K), np.nan)
+    rows, final, pre = [], {}, {}
+    for r in recs:
+        part = torch.load(out / f"{r['unit']}.models.pt", map_location="cpu", weights_only=False)
+        final.update(part["final"])
+        jt = np.load(out / f"{r['unit']}.jtest.npy")
+        for j in r["stages"]:
+            J[:, j] = jt[:, j]
+        rows += r["stage_progress"]
+    rows.sort(key=lambda r: r["stage"])
+    diverged = any(r["diverged"] for r in recs)
+    done = 0
+    while done < K and done in final:
+        done += 1
+    errs = training.errors_from_curves(J, prep.test, done, prep.scales)
+    torch.save({"pretrained": None, "final": final}, out / f"{base}.models.pt")
+    np.save(out / f"{base}.jtest.npy", J)
+    rec = {**{k: v for k, v in recs[0].items() if k not in ("unit", "stages", "stage_progress", "per_device_error")},
+           "unit": base, "parts": [r["unit"] for r in recs], "stages_done": done, "stages_planned": K,
+           "diverged": diverged, "stage_progress": rows, "per_device_error": errs,
+           "seconds": sum(r["seconds"] for r in recs), "gpu_hours": sum(r["gpu_hours"] for r in recs),
+           "created": steps._now()}
+    steps._write(out / f"{base}.json", rec)
+    return rec
+
+
 def final_unit(ctx: Ctx, uid: str, seed: int, lam: dict, out: Path, deadline: float, n_stages: int | None = None,
-               adam_max: int = ADAM_MAX, lbfgs_max: int = LBFGS_MAX, start: dict | None = None) -> dict | None:
+               adam_max: int = ADAM_MAX, lbfgs_max: int = LBFGS_MAX, start: dict | None = None,
+               stages: list | None = None) -> dict | None:
     """One seed: pretraining, then per stage Adam -> L-BFGS from theta_pre of that stage with the same loss and the
     same lambda. Resumable from `<uid>.ckpt.pt` (per stage, and every 15 min inside Adam). Returns the record, or
     None when the wall budget stopped it (checkpoint and partial record on disk)."""
@@ -636,7 +708,11 @@ def final_unit(ctx: Ctx, uid: str, seed: int, lam: dict, out: Path, deadline: fl
     model = new_model(ctx, seed)
     params = list(model.parameters())
     longest = max([r["seconds"] for r in st["rows"]], default=0.0)
-    for j in range(len(st["rows"]), K):
+    stages = [j for j in (stages if stages is not None else range(K)) if j < K]
+    whole = stages == list(range(K))
+    Kp = len(stages)
+    for j in [j for j in stages if j not in {r["stage"] for r in st["rows"]}]:
+        pos = stages.index(j)
         if st["diverged"]:
             break
         if time.time() + 1.05 * longest > deadline:
@@ -679,7 +755,7 @@ def final_unit(ctx: Ctx, uid: str, seed: int, lam: dict, out: Path, deadline: fl
                     gt = obj.term_grads(params)
                     rec["grad_norms"] = {k: float(lam[k] * np.linalg.norm(v)) for k, v in gt.items()}
                 tel.log(**rec)
-                frac = (j + (s + 1) / (adam_max + lbfgs_max)) / K
+                frac = (pos + (s + 1) / (adam_max + lbfgs_max)) / Kp
                 eta = tel.progress(frac, phase="adam", stage=j, step=s)
                 tel.line(f"stage {j + 1}/{K} · adam {s}/{adam_max} · loss {f:.3e} · ETA {eta}")
             if len(losses) > WINDOW and (losses[-WINDOW - 1] - losses[-1]) / abs(losses[-WINDOW - 1]) < TAU:
@@ -709,7 +785,7 @@ def final_unit(ctx: Ctx, uid: str, seed: int, lam: dict, out: Path, deadline: fl
             n_eval["k"] += 1
             if k % EVERY == 0:
                 tel.log(phase="lbfgs", stage=j, step=k, total=float(total), terms=terms, lr=None)
-                frac = (j + (adam_max + min(k, lbfgs_max)) / (adam_max + lbfgs_max)) / K
+                frac = (pos + (adam_max + min(k, lbfgs_max)) / (adam_max + lbfgs_max)) / Kp
                 eta = tel.progress(frac, phase="lbfgs", stage=j, step=k)
                 tel.line(f"stage {j + 1}/{K} · lbfgs eval {k} · loss {float(total):.3e} · ETA {eta}")
             return total
@@ -728,7 +804,8 @@ def final_unit(ctx: Ctx, uid: str, seed: int, lam: dict, out: Path, deadline: fl
         st["J_test"][:, j] = training.evaluate_currents(model, prep.test, Vt, prep.material, prep.scales, dev,
                                                         ctx.cfg.eval_chunk)
         st["stage_models"][j] = _cpu_state(model)
-        partial = np.array(list(training.errors_from_curves(st["J_test"], prep.test, j + 1, prep.scales).values()))
+        partial = (np.array(list(training.errors_from_curves(st["J_test"], prep.test, j + 1, prep.scales).values()))
+                   if whole else np.array([np.nan]))      # a split seed's PCE error is formed by merge_parts
         row = {"stage": j, "V": j * ctx.cfg.voltage_step, "loss_start": loss0, "loss_adam_end": f_adam,
                "loss_end": f_lb, "adam_steps": len(losses), "switched_at": switched, "lbfgs_iterations": lb_iters,
                "lbfgs_evaluations": n_eval["k"], "lbfgs_reverted": reverted, "gradient_shares_start": shares,
@@ -746,15 +823,17 @@ def final_unit(ctx: Ctx, uid: str, seed: int, lam: dict, out: Path, deadline: fl
                  f"partial PCE err median {row['partial_pce_error_median']:.2f}% · {row['seconds']:.0f}s")
         tel.plot()
     done = len([r for r in st["rows"] if not r.get("diverged")])
-    errs = ({u: float("nan") for u in prep.test.uids} if st["diverged"]
+    errs = ({u: float("nan") for u in prep.test.uids} if st["diverged"] or not whole
             else training.errors_from_curves(st["J_test"], prep.test, done, prep.scales))
     seconds = st["seconds"] + time.time() - t0
-    torch.save({"pretrained": st["pre"], "final": st["stage_models"]}, out / f"{uid}.models.pt")
+    torch.save({"pretrained": st["pre"] if whole else None, "final": st["stage_models"]}, out / f"{uid}.models.pt")
+    np.save(out / f"{uid}.jtest.npy", st["J_test"])
     rec = {"unit": uid, "step": "e6", "complete": True, "created": steps._now(), "seed": seed,
            "config": ctx.cfg.to_dict(), "lambda": lam, "loss_mode": LOSS_MODE, "sigma2": ctx.sigma2,
            "recipe": {"pre_steps": PRE_STEPS, "adam_max": adam_max, "tau": TAU, "window": WINDOW,
                       "lbfgs_max": lbfgs_max, "lbfgs_history": LBFGS_HISTORY, "lr": [LR0, LR_END], "clip": CLIP},
-           "stages_done": done, "stages_planned": K, "diverged": st["diverged"], "stage_progress": st["rows"],
+           "stages": stages, "stages_planned_total": K,
+           "stages_done": done, "stages_planned": Kp, "diverged": st["diverged"], "stage_progress": st["rows"],
            "per_device_error": errs, "seconds": seconds,
            "gpu_hours": seconds / 3600.0 if dev.type == "cuda" else 0.0, "device": str(dev)}
     steps._write(out / f"{uid}.json", rec)
@@ -781,8 +860,8 @@ def _worker(payload: str) -> None:
             if steps.is_complete(out / f"{uid}.json"):
                 print(f"[{uid}] complete, skipped", flush=True)
                 continue
-            seed = int(uid.rsplit("s", 1)[1])
-            if final_unit(ctx, uid, seed, lam, out, a["deadline"], start=prev_models(seed)) is None:
+            seed, stages, _ = unit_spec(uid, ctx.K)
+            if final_unit(ctx, uid, seed, lam, out, a["deadline"], start=prev_models(seed), stages=stages) is None:
                 break
 
 
@@ -831,9 +910,9 @@ def _run_payloads(payloads: list, ctx: Ctx, deadline: float) -> None:
         else:
             for uid in p["units"]:
                 if not steps.is_complete(Path(p["out"]) / f"{uid}.json"):
-                    seed = int(uid.rsplit("s", 1)[1])
+                    seed, stages, _ = unit_spec(uid, ctx.K)
                     if final_unit(ctx, uid, seed, p["lambda"], Path(p["out"]), deadline,
-                                  start=prev_models(seed)) is None:
+                                  start=prev_models(seed), stages=stages) is None:
                         return
 
 
@@ -1023,20 +1102,25 @@ def run_h(arm: str | None = None) -> dict:
     return smoke_arm(ctx, arm, lam, out, deadline)
 
 
-def run_f(units: list | None = None) -> list:
-    """The final runs: `pack@<h>h:e6-A-s0+e6-A-s1+e6-A-s2` tokens, one pack per GPU."""
+def run_f(units: list | None = None, account: int | None = None) -> list:
+    """The final runs: `pack@<h>h:e6-A-s0+e6-A-s1+e6-A-s2` tokens, one pack per GPU. `account` (v09) takes the
+    packs of that account from final_plan(), every GPU equally loaded; a seed whose parts are all here is merged."""
     start = time.time()
     deadline = _deadline("f", start)
     out = results_dir()
     lam = _lambda_star()
     packs = []
     default = [f"pack@10.5h:{UNIT}0", f"pack@10.5h:{UNIT}1"]   # v09: one seed per GPU; other accounts pass their own
+    if account is not None:
+        units = ["+".join(p) for p in final_plan()[account]]
     for tok in ([f"pack@10.5h:{u}" for u in units] if units else None) or _tokens() or default:
         m = steps._PACK.match(str(tok))
         packs.append(m.group(2).split("+") if m else [str(tok)])
     ctx = build_ctx()
     _run_payloads([{"role": "final", "units": p, "lambda": lam, "out": str(out), "deadline": deadline}
                    for p in packs], ctx, deadline)
+    for base in sorted({unit_spec(u, ctx.K)[2] for p in packs for u in p if ".p" in u}):
+        merge_parts(out, ctx.prep, base)
     return [u for p in packs for u in p if steps.is_complete(out / f"{u}.json")]
 
 
