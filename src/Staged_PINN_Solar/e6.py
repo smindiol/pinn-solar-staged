@@ -516,7 +516,7 @@ def full_lambda(phys: dict) -> dict:
 
 
 def run_trial(ctx: Ctx, start: dict, lam: dict, seed: int, deadline: float, trial=None, tel=None,
-              with_j: bool = False) -> float:
+              with_j: bool = False, grid: tuple | None = None) -> float:
     """theta_T(lambda): per grid stage, TRIAL_STEPS Adam steps from theta_prev of that stage (r06); the objective
     is the mean validation current error of r06 Eq. 13 over the stages done, reported after each stage to the
     pruner. The study minimizes log10 of that mean: a monotone transform, so the argmin of Eq. 13, TPE's
@@ -526,7 +526,7 @@ def run_trial(ctx: Ctx, start: dict, lam: dict, seed: int, deadline: float, tria
     model = new_model(ctx, seed)
     params = list(model.parameters())
     vals = []
-    for i, j in enumerate(GRID):
+    for i, j in enumerate(grid or GRID):
         if time.time() > deadline:
             raise TimeoutError("deadline inside a trial")
         model.load_state_dict(start[j])
@@ -556,7 +556,8 @@ def run_trial(ctx: Ctx, start: dict, lam: dict, seed: int, deadline: float, tria
 
 
 def tune_loop(ctx: Ctx, start: dict, journal: Path, worker: int, deadline: float, tel: Telemetry,
-              study_name: str | None = None, keys: tuple | None = None, target: int | None = None) -> None:
+              study_name: str | None = None, keys: tuple | None = None, target: int | None = None,
+              grid: tuple | None = None) -> None:
     """`keys` (default the physics terms) are searched in the box around the study's centre; "J" in `keys` adds
     the current term to every trial's loss. `target` stops the worker once the study holds that many trials."""
     import optuna
@@ -577,7 +578,7 @@ def tune_loop(ctx: Ctx, start: dict, journal: Path, worker: int, deadline: float
                                                           math.log10(c[k]) + BOX_DECADES) for k in keys})
         t = time.time()
         try:
-            value = run_trial(ctx, start, lam, 0, deadline, trial, tel, with_j="J" in keys)
+            value = run_trial(ctx, start, lam, 0, deadline, trial, tel, with_j="J" in keys, grid=grid)
             study.tell(trial, value)
             state = "complete" if value < PENALTY else "diverged"
         except optuna.TrialPruned:
@@ -865,7 +866,7 @@ def _worker(payload: str) -> None:
     if a["role"] == "tune":
         start = torch.load(a["start"], map_location="cpu", weights_only=False)
         tune_loop(ctx, start, Path(a["journal"]), a["worker"], a["deadline"], Telemetry(out, f"tune-w{a['worker']}"),
-                  study_name=a.get("study"), keys=a.get("keys"), target=a.get("target"))
+                  study_name=a.get("study"), keys=a.get("keys"), target=a.get("target"), grid=a.get("grid"))
     else:
         lam = a["lambda"]
         for uid in a["units"]:
@@ -874,7 +875,7 @@ def _worker(payload: str) -> None:
                 continue
             seed, stages, _ = unit_spec(uid, ctx.K)
             stages = stages[:a["stage_limit"]] if a.get("stage_limit") else stages
-            start = random_start(ctx, seed) if a.get("scratch") else prev_models(seed)   # scratch: no pretraining
+            start = _scratch_start(a, seed) if a.get("scratch") else prev_models(seed)   # scratch: pretrained here
             if final_unit(ctx, uid, seed, lam, out, a["deadline"], start=start, stages=stages,
                           adam_max=a.get("adam_max", ADAM_MAX), lbfgs_max=a.get("lbfgs_max", LBFGS_MAX),
                           tau=a.get("tau", TAU)) is None:
@@ -923,14 +924,14 @@ def _run_payloads(payloads: list, ctx: Ctx, deadline: float) -> None:
         if p["role"] == "tune":
             start = torch.load(p["start"], map_location="cpu", weights_only=False)
             tune_loop(ctx, start, Path(p["journal"]), p["worker"], deadline, Telemetry(Path(p["out"]), f"tune-w{p['worker']}"),
-                      study_name=p.get("study"), keys=p.get("keys"), target=p.get("target"))
+                      study_name=p.get("study"), keys=p.get("keys"), target=p.get("target"), grid=p.get("grid"))
         else:
             for uid in p["units"]:
                 if not steps.is_complete(Path(p["out"]) / f"{uid}.json"):
                     seed, stages, _ = unit_spec(uid, ctx.K)
                     stages = stages[:p["stage_limit"]] if p.get("stage_limit") else stages
                     if final_unit(ctx, uid, seed, p["lambda"], Path(p["out"]), deadline,
-                                  start=random_start(ctx, seed) if p.get("scratch") else prev_models(seed), stages=stages,
+                                  start=_scratch_start(p, seed) if p.get("scratch") else prev_models(seed), stages=stages,
                                   adam_max=p.get("adam_max", ADAM_MAX), lbfgs_max=p.get("lbfgs_max", LBFGS_MAX),
                                   tau=p.get("tau", TAU)) is None:
                         return
@@ -960,10 +961,11 @@ def prev_path(seed: int) -> Path | None:
     return _handoff_file(f"prev-r8-s{seed}.pt")
 
 
-def random_start(ctx: Ctx, seed: int) -> dict:
-    """No training at all: the seeded random initialisation of `seed` as the start of every stage (scratch control)."""
-    st = _cpu_state(new_model(ctx, seed))
-    return {j: st for j in range(ctx.K)}
+def _scratch_start(payload: dict, seed: int) -> dict | None:
+    """Scratch control: None makes final_unit pretrain `seed` from its random initialisation (theta_pre, Eq. 18
+    alone); a payload `start_file` (the smoke) reuses a pretrained network instead."""
+    p = payload.get("start_file")
+    return torch.load(p, map_location="cpu", weights_only=False) if p else None
 
 
 def prev_models(seed: int) -> dict | None:

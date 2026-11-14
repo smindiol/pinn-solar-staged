@@ -2,20 +2,19 @@
 
 Question: is the r09 result owed to the chain of earlier trainings (r05 -> r06 -> r08 -> r09, each stage warm-started
 from the previous run) or does the r09 recipe reach it from nothing? Nothing of the recipe changes: the same network,
-the same loss over I'' = physics terms + data + J (r09 Eq. 23), the same Eq. 12 centre and Optuna box, the same
-Adam -> L-BFGS phases. What changes is the start and the budget:
+the same normalisation (sigma2 measured on the training split, per-node relative residual, J / J_sc), the same loss
+over I'' = physics terms + data + J (r09 Eq. 23), and the Optuna study run exactly like the last one (r08 P/Q): the
+Eq. 12 rule at theta_pre gives the centre of every lambda, each searched in a box of +-BOX_DECADES around it,
+lambda_data = 1 as the reference. What changes is the start and the budget:
 
-  study  every lambda of I'' except lambda_data = 1 (the reference) re-tuned by Optuna, trials from the random
-         initialisation of seed 0 (no pretraining at all, operator 2026-11-14), centre by Eq. 12 at that
-         initialisation over I''.
-         Two independent parts (one account each, two GPU workers), TRIALS_PER_PART trials each; the parts are
-         joined locally by `join_studies` (same objective, same box), best complete trial wins.
-  final  every seed from its random initialisation (no pretraining), then per stage ADAM fixed Adam steps (no plateau
-         switch) and up to LBFGS L-BFGS evaluations: about the steps the r09 networks accumulated over
-         r05, r06, r08 and r09 (each stopped Adam at ~150-270 steps and used ~430 L-BFGS evaluations).
-         Seeds split over every GPU with e6.final_plan, as in r09 F.
-  smoke  one short kernel: one trial per GPU worker and one heavy stage per GPU with a cut budget, to measure
-         time per step and peak GPU memory and to project the study and final wall times.
+  study  every lambda of I'' re-tuned, trials from theta_pre (pretraining on Eq. 18 alone from a random
+         initialisation, seed 0, as before), centre by Eq. 12 at theta_pre over I'' (the r08 study's rule, now
+         including J). One account, both GPU workers on ONE journal (every trial sees the others), TRIALS trials.
+  final  every seed pretrained here (as r05's final did), then per stage ADAM fixed Adam steps (no plateau switch)
+         and up to LBFGS L-BFGS evaluations, nothing carried over from earlier runs. Seeds split over every GPU with
+         e6.final_plan, as in r09 F.
+  smoke  one short kernel (~10 min): one single-stage trial per GPU worker and one cut near-Voc stage per GPU
+         from theta_pre, to measure time per step and peak GPU memory and project the study and final wall times.
 """
 from __future__ import annotations
 
@@ -32,29 +31,30 @@ from . import e6, steps, training, weights
 STUDY = "e6s"
 UNIT = "e6s-A-s"
 BEST = "best_lambda_s.json"
-PRE = "init_s0.pt"
+JOURNAL = "optuna_journal_s.log"
 KEYS = training.TERMS + ("J",)
-TRIALS_PER_PART = 25            # two parts -> 50 trials
-ADAM, LBFGS, TAU = 1000, 1700, None      # TAU None: no plateau switch, all ADAM steps run
-HOURS = {"study": 4.5, "final": 10.5, "smoke": 0.75}
-SMOKE = dict(units=(f"{UNIT}0.p21of24", f"{UNIT}1.p20of24"), adam=150, lbfgs=150)
-
-
-def journal_name(part: int) -> str:
-    return f"optuna_journal_s{part}.log"
+TRIALS = 50
+ADAM, LBFGS, TAU = 2000, 500, None      # TAU None: no plateau switch, all ADAM steps run
+HOURS = {"study": 8.0, "final": 10.5, "smoke": 0.4}
+PRETRAIN_S = 240.0                      # measured: theta_pre of 24 stages took 240 s on one T4 (r08 P, 2026-11-13)
+SMOKE = dict(units=(f"{UNIT}0.p21of24", f"{UNIT}1.p20of24"), adam=100, lbfgs=100, grid=(20,))
 
 
 def theta_pre(ctx, out: Path, tel, deadline: float) -> tuple[dict, Path]:
-    """The start of the study: the random initialisation of seed 0 at every stage (no pretraining)."""
-    pre = e6.random_start(ctx, 0)
-    p = out / PRE
+    """theta_pre of seed 0 (Eq. 18 alone, from a random initialisation): the handed-over copy when present,
+    pretrained here otherwise (as the r08 study did)."""
+    p = e6._handoff_file("pretrained.pt")
+    if p is not None:
+        return torch.load(p, map_location="cpu", weights_only=False), p
+    pre = e6.pretrain(ctx, 0, ctx.K, tel, deadline)
+    p = out / "pretrained.pt"
     torch.save(pre, p)
     return pre, p
 
 
 def centre_all(ctx, pre: dict, seed: int = 0) -> dict:
-    """Eq. 12 at the random initialisation over I'' (the r09 Eq. 24 rule extended to every term): lambda_hat per grid stage,
-    rescaled so lambda_data = 1, geometric mean over GRID."""
+    """Eq. 12 at theta_pre over I'' (the r08 study's centre, extended to the current term like r09 Eq. 24):
+    lambda_hat per grid stage, rescaled so lambda_data = 1, geometric mean over GRID."""
     model = e6.new_model(ctx, seed)
     params = list(model.parameters())
     logs = {k: [] for k in KEYS}
@@ -70,41 +70,40 @@ def centre_all(ctx, pre: dict, seed: int = 0) -> dict:
     return {k: 10.0 ** float(np.mean(v)) for k, v in logs.items()}
 
 
-def _study(ctx, part: int, out: Path, deadline: float, target: int, journal: Path | None = None) -> dict:
-    tel = e6.Telemetry(out, f"scratch-study-p{part}")
+def _study(ctx, out: Path, deadline: float, target: int, journal: Path, grid: tuple | None = None) -> dict:
+    tel = e6.Telemetry(out, "scratch-study")
     pre, pre_path = theta_pre(ctx, out, tel, deadline)
-    journal = journal or out / journal_name(part)
     c = centre_all(ctx, pre, 0)
-    tel.line(f"Eq. 12 centre over I'' at the random init (lambda_data = 1): "
+    tel.line(f"Eq. 12 centre over I'' at theta_pre (lambda_data = 1): "
              f"{json.dumps({k: float(f'{v:.3e}') for k, v in c.items()})}")
     e6.open_study(journal, 0, create_centre=c, study_name=STUDY)
     if ctx.dev.type == "cuda":
         torch.cuda.empty_cache()
     n = min(max(e6._n_gpu(), 1), 2)
-    e6._run_payloads([{"role": "tune", "worker": 10 * (part + 1) + w, "start": str(pre_path), "journal": str(journal),
-                       "out": str(out), "deadline": deadline, "study": STUDY, "keys": list(KEYS), "target": target}
-                      for w in range(n)], ctx, deadline)
+    e6._run_payloads([{"role": "tune", "worker": 10 + w, "start": str(pre_path), "journal": str(journal),
+                       "out": str(out), "deadline": deadline, "study": STUDY, "keys": list(KEYS), "target": target,
+                       "grid": list(grid) if grid else None} for w in range(n)], ctx, deadline)
     s = e6.study_summary(journal, STUDY)
-    s.update(part=part, centre=c, created=steps._now())
+    s.update(part=0, centre=c, created=steps._now(), pretrained=str(pre_path))
     return s
 
 
-def run_study(part: int) -> dict:
-    """One part of the scratch study (one account, both GPUs), stopping at TRIALS_PER_PART trials."""
+def run_study() -> dict:
+    """The scratch study on one account: both GPU workers share one journal, stopping at TRIALS trials."""
     start = time.time()
     out = e6.results_dir()
     out.mkdir(parents=True, exist_ok=True)
     ctx = e6.build_ctx()
-    s = _study(ctx, part, out, start + HOURS["study"] * 3600.0, TRIALS_PER_PART)
+    s = _study(ctx, out, start + HOURS["study"] * 3600.0, TRIALS, out / JOURNAL)
     s["hours"] = (time.time() - start) / 3600.0
-    steps._write(out / f"study-s{part}.json", s)
-    print(f"[scratch study p{part}] trials {s['n_trials']} · complete {s['complete']} · pruned {s['pruned']} · "
+    steps._write(out / "study-s.json", s)
+    print(f"[scratch study] trials {s['n_trials']} · complete {s['complete']} · pruned {s['pruned']} · "
           f"best {s.get('best_value')} · {s['hours']:.2f} h", flush=True)
     return s
 
 
 def join_studies(summaries: list[dict]) -> dict:
-    """Join the parts (same objective, same centre and box): the best complete trial over all of them."""
+    """The best complete trial over the study summaries (one, or several parts with the same objective and box)."""
     best, total = None, {"n_trials": 0, "complete": 0, "pruned": 0, "failed": 0}
     for s in summaries:
         for k in total:
@@ -117,12 +116,12 @@ def join_studies(summaries: list[dict]) -> dict:
     part, t = best
     lam = e6.full_lambda({k[6:]: 10.0 ** v for k, v in t["params"].items() if k.startswith("log10_")})
     return {"lambda": lam, "part": part, "trial": t["number"], "value": t["value"], **total,
-            "centre": summaries[0].get("centre"), "rule": "scratch study: Optuna over I'' from the random initialisation"}
+            "centre": summaries[0].get("centre"), "rule": "scratch study: Optuna over I'' from theta_pre"}
 
 
 def run_final(account: int) -> list:
-    """The scratch final runs of `account` (e6.final_plan with UNIT): every seed from its random init, fixed ADAM Adam
-    steps then up to LBFGS L-BFGS evaluations per stage, lambda from best_lambda_s.json."""
+    """The scratch final runs of `account` (e6.final_plan with UNIT): every seed pretrained here, then ADAM fixed
+    Adam steps and up to LBFGS L-BFGS evaluations per stage, lambda from best_lambda_s.json."""
     start = time.time()
     deadline = start + HOURS["final"] * 3600.0
     out = e6.results_dir()
@@ -143,22 +142,22 @@ def _history(out: Path, name: str) -> list:
 
 
 def run_smoke() -> dict:
-    """Short check before the long kernels: a 2-trial study (one per GPU worker) and one heavy near-Voc stage per
-    GPU, each from the random initialisation with a cut Adam/L-BFGS budget. Projects the wall times."""
+    """~10 min check before the long kernels: a 2-trial study on one grid stage (one trial per GPU worker) and one
+    near-Voc stage per GPU from theta_pre with a cut Adam/L-BFGS budget. Projects the study and final wall times."""
     start = time.time()
     deadline = start + HOURS["smoke"] * 3600.0
     out = e6.results_dir() / "smoke-s"
     out.mkdir(parents=True, exist_ok=True)
     ctx = e6.build_ctx()
     t0 = time.time()
-    study = _study(ctx, 9, out, deadline, 2, journal=out / "optuna_journal_smoke.log")
+    study = _study(ctx, out, deadline, 2, out / "optuna_journal_smoke.log", grid=SMOKE["grid"])
     t_study = time.time() - t0
-    trials = [r for w in (100, 101) for r in _history(out, f"tune-w{w}") if r.get("kind") == "trial"]
-    lam = e6.full_lambda({k: v for k, v in study["centre"].items()})      # the centre itself: values not judged
+    trials = [r for w in (10, 11) for r in _history(out, f"tune-w{w}") if r.get("kind") == "trial"]
+    lam = e6.full_lambda(dict(study["centre"]))                       # the centre itself: values not judged
     t1 = time.time()
     e6._run_payloads([{"role": "final", "units": [u], "lambda": lam, "out": str(out), "deadline": deadline,
-                       "scratch": True, "adam_max": SMOKE["adam"], "lbfgs_max": SMOKE["lbfgs"], "tau": TAU}
-                      for u in SMOKE["units"]], ctx, deadline)
+                       "scratch": True, "start_file": study["pretrained"], "adam_max": SMOKE["adam"],
+                       "lbfgs_max": SMOKE["lbfgs"], "tau": TAU} for u in SMOKE["units"]], ctx, deadline)
     t_final = time.time() - t1
     units = {}
     for u in SMOKE["units"]:
@@ -169,26 +168,24 @@ def run_smoke() -> dict:
         r = json.loads(p.read_text())
         row = r["stage_progress"][0]
         evals = row["adam_steps"] + row["lbfgs_evaluations"]
-        units[u] = {"stage": row["stage"], "seconds_stage": row["seconds"], "evals": evals,
-                    "s_per_eval": row["seconds"] / max(evals, 1), "seconds_unit": r["seconds"],
+        units[u] = {"stage": row["stage"], "seconds_stage": row["seconds"], "adam_steps": row["adam_steps"],
+                    "lbfgs_evaluations": row["lbfgs_evaluations"], "s_per_eval": row["seconds"] / max(evals, 1),
                     "diverged": r["diverged"], "peak_mem_gb": r.get("peak_mem_gb")}
     ok = [v for v in units.values() if v]
     s_eval = max(v["s_per_eval"] for v in ok) if ok else float("nan")
-    pre_s = max(v["seconds_unit"] - v["seconds_stage"] for v in ok) if ok else float("nan")
-    trial_s = max([t["seconds"] for t in trials], default=float("nan"))
+    trial_stage_s = max([t["seconds"] for t in trials], default=float("nan")) / len(SMOKE["grid"])
     stages_per_gpu = max(sum(len(e6.unit_spec(u, ctx.K)[1]) for u in pack)
                          for packs in e6.final_plan(unit=UNIT) for pack in packs)
-    eta_final_h = (stages_per_gpu * (ADAM + LBFGS) * s_eval + 2 * pre_s) / 3600.0
-    eta_study_h = math.ceil(TRIALS_PER_PART / 2) * trial_s / 3600.0
+    eta_final_h = (stages_per_gpu * (ADAM + LBFGS) * s_eval + 2 * PRETRAIN_S) / 3600.0
+    eta_study_h = math.ceil(TRIALS / 2) * len(e6.GRID) * trial_stage_s / 3600.0     # upper bound: no pruning
     rec = {"unit": "e6s-smoke", "complete": True, "created": steps._now(), "n_gpu": e6._n_gpu(),
-           "study": {"trials": len(trials), "states": [t.get("state") for t in trials], "trial_seconds": trial_s,
-                     "seconds": t_study, "centre": study["centre"]},
-           "final": units, "final_seconds": t_final, "pretrain_seconds": pre_s, "s_per_eval": s_eval,
-           "stages_per_gpu": stages_per_gpu, "eta_study_hours": eta_study_h, "eta_final_hours": eta_final_h,
-           "seconds": time.time() - start}
+           "study": {"trials": len(trials), "states": [t.get("state") for t in trials],
+                     "trial_stage_seconds": trial_stage_s, "seconds": t_study, "centre": study["centre"]},
+           "final": units, "final_seconds": t_final, "s_per_eval": s_eval, "stages_per_gpu": stages_per_gpu,
+           "eta_study_hours": eta_study_h, "eta_final_hours": eta_final_h, "seconds": time.time() - start}
     rec["pass"] = bool(len(trials) >= 2 and len(ok) == len(SMOKE["units"]) and not any(v["diverged"] for v in ok)
                        and eta_study_h <= HOURS["study"] and eta_final_h <= HOURS["final"] - 0.5)
     steps._write(e6.results_dir() / "e6s-smoke.json", rec)
-    print(f"[scratch smoke] {json.dumps({k: rec[k] for k in ('n_gpu', 's_per_eval', 'pretrain_seconds', 'eta_study_hours', 'eta_final_hours', 'pass')})}",
+    print(f"[scratch smoke] {json.dumps({k: rec[k] for k in ('n_gpu', 's_per_eval', 'eta_study_hours', 'eta_final_hours', 'pass')})}",
           flush=True)
     return rec
