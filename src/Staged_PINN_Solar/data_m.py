@@ -1,0 +1,281 @@
+"""Reader of base B (network M, r11 Sections 2-3, Eqs. 25-27) and its split `split_m.csv`.
+
+Base B lives in `dpv-dataset/base_b/`: one file per material, `dpvB_<material>.h5`, with one flat group per
+device named `<origin>__<key>` (datasets V, J, Jn, Jp, G, phi_eq, x_cm, pots; scalar attributes for the
+material and the design). Group names repeat across materials (`dpvB2__dev_000000` exists in four files), so
+a device is identified by `<material>/<group>`. The upload bundle written by `write_bundle` holds the same groups,
+unchanged, under one top-level group per material of ONE file, `base_m.h5` (`/<material>/<group>`), next to
+`split_m.csv`; both layouts are read the same way.
+
+Two conventions differ between origins and are unified here (measured, see `tests/test_data_m.py`):
+
+* `x_cm` is the Debye coordinate x / L_D (C0 = 1e19 cm^-3) for origins E1A / E1B (the E1 files, see `data.py`)
+  and centimetres for dpvB2 / dpvB1_cancelled (rebuilt from deltapv's design grid). Both give
+  x_hat = x / x[-1]; the Debye coordinate of the loader is x_hat (L_n + L_p) / L_D, so that
+  `Device.delta` = L_D / (L_n + L_p) for every origin (r11 Eq. 2 with the global C0);
+* nothing else differs: G, the potentials and the stored interface currents are deltapv's dimensionless fields
+  for the global scales C0 = 1e19, mu0 = 1 in every origin (the dPV reference closes the equations at the same
+  order in both, see the test).
+
+Base B stores no `u`, no xi JSON, no P_in and no trap level: Et = 0 and P_in = 899.9167906 W/m^2 (S3).
+The network inputs are the 11 parameters of r11 Eq. 25 (`XI_PARAMS`), min-max over the TRAINING split.
+"""
+
+from __future__ import annotations
+
+import csv
+import os
+import time
+from dataclasses import dataclass
+from pathlib import Path
+
+import h5py
+import numpy as np
+
+from . import data
+from .ansatz import normalize_xi
+from .scaling import Scales
+
+__provenance__ = {
+    "revision": "research-concept-entrenamiento-por-etapas-de-una-pinn-no-lineal-para-el-model-r10.md",
+    "sections": ["2", "3", "5", "6"],
+    "equations": ["2", "25", "26", "27"],
+    "invariants": [
+        "base_m_split_counts_are_1621_203_200",
+        "base_m_device_unifies_the_coordinate_of_every_origin",
+        "base_m_device_material_equals_its_attributes",
+        "base_m_inputs_are_eleven_normalized_parameters",
+        "base_m_bundle_reproduces_the_devices",
+        "base_m_root_prefers_env_then_kaggle_input_then_workspace",
+    ],
+}
+
+BASE_M_DATASET = "sgarizado/dpv-pinn-base-m"       # Kaggle dataset of the bundle (base_m.h5 + split_m.csv)
+SPLIT_FILE = "split_m.csv"
+BUNDLE_FILE = "base_m.h5"
+MATERIALS = ("E1gen", "InP", "CdTe", "Si")
+DEBYE_ORIGINS = ("E1A", "E1B")                       # x_cm stored as x / L_D; every other origin in cm
+P_IN_STD = 899.9167906040965                         # W/m^2, standard spectrum (S3)
+
+#: r11 Eq. 25: the 11 parameters of the network input, with g_j = log10 or identity (S1). chi, Br, A are not inputs.
+XI_PARAMS = (("Nd_n", "log"), ("Na_p", "log"), ("L_n", "lin"), ("L_p", "lin"), ("Eg", "lin"), ("Nc", "log"),
+             ("Nv", "log"), ("eps", "lin"), ("mn", "log"), ("mp", "log"), ("tau", "log"))
+
+#: data.E1_MATERIAL key -> group attribute (Et is not stored: 0, S2).
+_MATERIAL_ATTRS = dict(Chi="Chi", Eg="Eg", eps="eps", Nc="Nc", Nv="Nv", mn="mn", mp="mp", tn="tn", tp="tp", Br="Br")
+_CONSISTENCY_RTOL = 1e-6
+
+
+def local_root() -> Path:
+    """The workspace copy: dpv-dataset/base_b next to implementations/."""
+    return Path(__file__).resolve().parents[4] / "dpv-dataset" / "base_b"
+
+
+def _has_files(d: Path) -> bool:
+    return (d / SPLIT_FILE).is_file() and ((d / BUNDLE_FILE).is_file()
+                                           or any((d / f"dpvB_{m}.h5").is_file() for m in MATERIALS))
+
+
+def _kaggle_root(base: Path) -> Path | None:
+    """A directory under `base` holding split_m.csv and the devices (bundle or per-material files)."""
+    if not base.is_dir():
+        return None
+    for path in sorted(base.rglob(SPLIT_FILE)):
+        if _has_files(path.parent):
+            return path.parent
+    return None
+
+
+def default_root() -> Path:
+    """Where base B is, in this order: env DPV_BASE_M; a directory under /kaggle/input holding split_m.csv and the
+    devices; the workspace's dpv-dataset/base_b. Choosing a root never touches the network."""
+    env = os.environ.get("DPV_BASE_M")
+    if env:
+        return Path(env)
+    found = _kaggle_root(data.KAGGLE_INPUT)
+    return found if found is not None else local_root()
+
+
+def ensure_dataset(slug: str = BASE_M_DATASET, root=None) -> Path:
+    """The root, downloading the bundle (base_m.h5, split_m.csv) with kagglehub when `default_root()` lacks it."""
+    root = Path(root) if root else default_root()
+    if _has_files(root):
+        return root
+    os.environ["DISABLE_KAGGLE_CACHE"] = "1"
+    import kagglehub
+
+    got = None
+    for name in (SPLIT_FILE, BUNDLE_FILE):
+        got = Path(kagglehub.dataset_download(slug, path=name)).parent
+    os.environ["DPV_BASE_M"] = str(got)
+    return got
+
+
+@dataclass(frozen=True)
+class DeviceRefM:
+    """A pointer to one base-B device (`<origin>__<key>` in `source`); nothing is read until `load_device`."""
+
+    group: str
+    material: str
+    origin: str
+    source: Path
+    n_V: int = 0
+
+    @property
+    def uid(self) -> str:
+        """Unique over base B (group names repeat across materials)."""
+        return f"{self.material}/{self.group}"
+
+    @property
+    def key(self) -> str:
+        """The device's path inside `source`: `<group>` in dpvB_<material>.h5, `<material>/<group>` in the bundle."""
+        return self.uid if self.source.name == BUNDLE_FILE else self.group
+
+
+def source_file(root: Path, material: str) -> Path:
+    root = Path(root)
+    bundle = root / BUNDLE_FILE
+    return bundle if bundle.is_file() else root / f"dpvB_{material}.h5"
+
+
+def read_split(root=None) -> list[dict]:
+    root = Path(root) if root else default_root()
+    with open(root / SPLIT_FILE, newline="") as f:
+        return list(csv.DictReader(f))
+
+
+def split_m(root=None, rows: list | None = None) -> data.Split:
+    """S4: the train / val / test references of `split_m.csv` (column `split`), in the file's order."""
+    root = Path(root) if root else default_root()
+    rows = rows if rows is not None else read_split(root)
+    out = {"train": [], "val": [], "test": []}
+    for r in rows:
+        out[r["split"]].append(DeviceRefM(r["group"], r["material"], r["origin"], source_file(root, r["material"]),
+                                          int(r["n_voltajes"])))
+    return data.Split(out["train"], out["val"], out["test"])
+
+
+def xi_specs(rows: list[dict]) -> tuple:
+    """r11 Eq. 25: (name, 'log'|'lin', min, max) of each input over the given rows (pass the TRAINING rows)."""
+    specs = []
+    for name, kind in XI_PARAMS:
+        v = np.array([float(r[name]) for r in rows])
+        specs.append((name, kind, float(v.min()), float(v.max())))
+    return tuple(specs)
+
+
+def material_of(attrs) -> dict:
+    """The device's constants in data.E1_MATERIAL's keys (tn = tp = tau, Et = 0; S2)."""
+    m = {k: float(attrs[a]) for k, a in _MATERIAL_ATTRS.items()}
+    m["Et"] = 0.0
+    return m
+
+
+def load_device(ref: DeviceRefM, specs: tuple = ()) -> data.Device:
+    """One base-B device as a `data.Device` on the loader's unified coordinate (module docstring)."""
+    scales = Scales()
+    with h5py.File(ref.source, "r") as f:
+        g = f[ref.key]
+        a = g.attrs
+        n_v = int(a["n_voltajes"])
+        x = g["x_cm"][()]
+        L = float(a["L_n"]) + float(a["L_p"])
+        x_end_cm = float(x[-1]) * scales.L_D if ref.origin in DEBYE_ORIGINS else float(x[-1])
+        if abs(x_end_cm - L) > _CONSISTENCY_RTOL * L:
+            raise ValueError(f"{ref.uid}: x[-1] reads {x_end_cm:.6e} cm, L_n + L_p = {L:.6e} cm")
+        x_hat = x / x[-1]
+        xi = {name: float(a[name]) for name, _ in XI_PARAMS}
+        pots = g["pots"][:n_v]
+        return data.Device(
+            ref=ref, xi=xi, u=normalize_xi(xi, specs) if specs else np.zeros(0), V=g["V"][:n_v],
+            x_debye=x_hat * (L / scales.L_D), G=g["G"][()], phi_eq=g["phi_eq"][()],
+            phi=pots[:, 0], phi_n=pots[:, 1], phi_p=pots[:, 2], J_n=g["Jn"][:n_v], J_p=g["Jp"][:n_v],
+            pce=float(a["eff"]), xi_specs=tuple(specs), J=g["J"][:n_v], p_in_std=P_IN_STD,
+            material=material_of(a))
+
+
+def write_bundle(out_dir, root=None, groups: list | None = None) -> dict:
+    """Write `<out_dir>/base_m.h5` (the split's devices only, same group names, datasets and attributes, copied
+    with their compression) and `<out_dir>/split_m.csv` (the rows of those devices) for upload as a Kaggle dataset.
+    `groups` (`<material>/<group>` uids) restricts both to a subset (a test). Never uploads."""
+    root = Path(root) if root else default_root()
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    rows = read_split(root)
+    if groups is not None:
+        keep = set(groups)
+        rows = [r for r in rows if f"{r['material']}/{r['group']}" in keep]
+    t0 = time.time()
+    by_file: dict = {}
+    for r in rows:
+        by_file.setdefault(source_file(root, r["material"]), []).append((r["material"], r["group"]))
+    with h5py.File(out_dir / BUNDLE_FILE, "w") as dst:
+        for path, names in by_file.items():
+            src_bundle = path.name == BUNDLE_FILE
+            with h5py.File(path, "r") as src:
+                for material, name in names:
+                    parent = dst.require_group(material)
+                    src.copy(src[f"{material}/{name}" if src_bundle else name], parent, name=name)
+    with open(out_dir / SPLIT_FILE, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=list(rows[0]) if rows else ["group", "split"])
+        w.writeheader()
+        w.writerows(rows)
+    return {"devices": len(rows), "bytes": (out_dir / BUNDLE_FILE).stat().st_size, "seconds": time.time() - t0}
+
+
+# --- the prepared base (training.Prepared plus the E6 context arrays) in one pass per device ---------------------
+def prepare(root=None, config=None, report=print, limit: int | None = None):
+    """sigma_i^2 (S7: measured on base-B TRAIN), the ansatz bounds, the three banks with per-device material,
+    and the stored fields / dPV currents of the E6 context, reading each device ONCE.
+
+    K = max n_V over the training split (r11 Eq. 27), capped by `config.max_voltages` / `max_stages`.
+    `limit` caps each split (tests and rehearsal). Returns (Prepared, fields, currents, K)."""
+    from . import ansatz as ansatz_mod
+    from . import loss, pce, training
+    from .config import Config
+
+    cfg = config or Config()
+    root = Path(root) if root else ensure_dataset()
+    t0 = time.time()
+    rows = read_split(root)
+    split = split_m(root, rows)
+    cap = (lambda refs: refs[:limit]) if limit else (lambda refs: refs)
+    refs = {"train": cap(split.train), "val": cap(split.val), "test": cap(split.test)}
+    specs = xi_specs([r for r in rows if r["split"] == "train"])     # the whole training split, even under `limit`
+    K = min(max(r.n_V for r in refs["train"]), cfg.max_voltages, cfg.max_stages or 10 ** 9)
+    scales = Scales()
+    stats = loss.ReferenceStatistics()
+    fields, currents, banks = {}, {}, {}
+
+    def stream(name, builder):
+        F = currents_arr = None
+        for d, ref in enumerate(refs[name]):
+            dev = load_device(ref, specs)
+            if F is None:
+                F = np.full((len(refs[name]), K, 3, len(dev.x_hat)), np.nan, dtype=np.float32)
+                currents_arr = np.full((len(refs[name]), K), np.nan)
+            n = min(len(dev.V), K)
+            F[d, :n, 0], F[d, :n, 1], F[d, :n, 2] = dev.phi[:n], dev.phi_n[:n], dev.phi_p[:n]
+            currents_arr[d, :n] = pce.terminal_current_stored(dev, scales)[:n]
+            builder.add(dev)
+            if name == "train":
+                stats.add(loss.reference_terms(dev, scales))
+            if report and (d + 1) % 250 == 0:
+                report(f"[data_m] {name}: {d + 1}/{len(refs[name])} devices, {time.time() - t0:.0f}s")
+            yield dev
+        fields[name], currents[name] = F, currents_arr
+
+    builder = training._BankBuilder(scales, specs)
+    bounds = ansatz_mod.measure_bounds(stream("train", builder), scales, margin=cfg.qf_box_margin)
+    banks["train"] = builder.finish()
+    for name in ("val", "test"):
+        b = training._BankBuilder(scales, specs)
+        for _ in stream(name, b):
+            pass
+        banks[name] = b.finish()
+    prep = training.Prepared(scales, stats.sigma2(), bounds, banks["train"], banks["val"], banks["test"], len(specs),
+                             None, data.device_contacts(scales), str(root), stats, refs)
+    if report:
+        report(f"[data_m] base M ready: {len(prep.train)}/{len(prep.val)}/{len(prep.test)} devices, K = {K}, "
+               f"{time.time() - t0:.0f}s")
+    return prep, fields, currents, K

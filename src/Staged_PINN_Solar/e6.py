@@ -230,7 +230,9 @@ def current_batch(ctx: Ctx, stage: int, seed: int, n_dev: int = None) -> dict:
     return {"x": t(bank.x_hat[pick].reshape(-1, 1)), "xi": t(np.repeat(bank.xi_hat[pick], N, axis=0)),
             "peq0": t(np.repeat(bank.phi_eq0[pick], N)[:, None]), "peq1": t(np.repeat(bank.phi_eq1[pick], N)[:, None]),
             "G": t(bank.G[pick]), "x_hat": t(bank.x_hat[pick]), "delta": t(bank.delta[pick]),
-            "J_ref": t(ref[:, stage]), "J_sc": t(ref[:, 0]), "n": int(pick.size), "N": int(N), "devices": pick}
+            "J_ref": t(ref[:, stage]), "J_sc": t(ref[:, 0]), "n": int(pick.size), "N": int(N), "devices": pick,
+            **({} if getattr(bank, "mat", None) is None else          # network M: per-device material (n, 1)
+               {"mat": {f: t(bank.mat[f][pick][:, None]) for f in training.MAT_FIELDS}})}
 
 
 def gr_current_torch(model, cb: dict, V_tilde: float, ctx: Ctx) -> torch.Tensor:
@@ -240,7 +242,7 @@ def gr_current_torch(model, cb: dict, V_tilde: float, ctx: Ctx) -> torch.Tensor:
     phi, phi_n, phi_p = model(cb["x"], cb["xi"], cb["peq0"], cb["peq1"], V_tilde)
     shape = lambda a: a.reshape(cb["n"], cb["N"])
     phi, phi_n, phi_p = shape(phi), shape(phi_n), shape(phi_p)
-    mm = m.like(phi)
+    mm = (m if "mat" not in cb else training.batch_material(cb, "mat", None, 0.0)).like(phi)
     n, p = carriers.electron_density(phi, phi_n, mm), carriers.hole_density(phi, phi_p, mm)
     n_eq, p_eq = carriers.equilibrium_densities(phi, mm)
     f = cb["G"] - carriers.recombination(n, p, mm)
@@ -422,9 +424,11 @@ def _apply(params, grads) -> None:
         p.grad = g.detach().clone()
 
 
-def pretrain(ctx: Ctx, seed: int, n_stages: int, tel: Telemetry, deadline: float | None = None) -> dict:
-    """theta_pre: Adam on Eq. 18 alone, PRE_STEPS per stage, stages 0..n_stages-1 in continuation from the
-    equilibrium start. A fresh data batch per step (devices whose curve reaches the stage)."""
+def pretrain(ctx: Ctx, seed: int, n_stages: int, tel: Telemetry, deadline: float | None = None,
+             n_steps: int | None = None) -> dict:
+    """theta_pre: Adam on Eq. 18 alone, PRE_STEPS (or `n_steps`, a rehearsal) per stage, stages 0..n_stages-1 in
+    continuation from the equilibrium start. A fresh data batch per step (devices whose curve reaches the stage)."""
+    n_steps = PRE_STEPS if n_steps is None else int(n_steps)
     torch.manual_seed(seed)
     model = new_model(ctx, seed)
     params = list(model.parameters())
@@ -432,8 +436,8 @@ def pretrain(ctx: Ctx, seed: int, n_stages: int, tel: Telemetry, deadline: float
     for j in range(n_stages):
         if deadline is not None and time.time() > deadline:
             raise TimeoutError(f"wall budget reached during pretraining at stage {j}")
-        opt, sched = _adam(params, PRE_STEPS)
-        for s in range(PRE_STEPS):
+        opt, sched = _adam(params, n_steps)
+        for s in range(n_steps):
             b = stage_batch(ctx, "train", j, [int(seed), j, s, 29], PRE_DEVICES, PRE_NODES)
             L = data_loss(model, b, ctx.V(j), ctx.scale)
             if not torch.isfinite(L):
@@ -443,7 +447,7 @@ def pretrain(ctx: Ctx, seed: int, n_stages: int, tel: Telemetry, deadline: float
             torch.nn.utils.clip_grad_norm_(params, CLIP)
             opt.step()
             sched.step()
-            if s % EVERY == 0 or s == PRE_STEPS - 1:
+            if s % EVERY == 0 or s == n_steps - 1:
                 tel.log(phase="pretrain", stage=j, step=s, total=float(L), terms={"data": float(L)},
                         lr=sched.get_last_lr()[0])
         states[j] = _cpu_state(model)
@@ -859,11 +863,20 @@ def final_unit(ctx: Ctx, uid: str, seed: int, lam: dict, out: Path, deadline: fl
 
 
 # --- workers (one process per GPU) -------------------------------------------------------------------------
+def _call(ctx: Ctx, a: dict):
+    """Role "call": run `module:function(ctx, payload)` (network M's smoke worker)."""
+    import importlib
+    mod, fn = a["fn"].split(":")
+    return getattr(importlib.import_module(mod), fn)(ctx, a)
+
+
 def _worker(payload: str) -> None:
     a = json.loads(payload)
     ctx = _load_ctx(a["ctx"])
     out = Path(a["out"])
-    if a["role"] == "tune":
+    if a["role"] == "call":
+        _call(ctx, a)
+    elif a["role"] == "tune":
         start = torch.load(a["start"], map_location="cpu", weights_only=False)
         tune_loop(ctx, start, Path(a["journal"]), a["worker"], a["deadline"], Telemetry(out, f"tune-w{a['worker']}"),
                   study_name=a.get("study"), keys=a.get("keys"), target=a.get("target"), grid=a.get("grid"))
@@ -921,7 +934,9 @@ def _run_payloads(payloads: list, ctx: Ctx, deadline: float) -> None:
         _spawn(payloads, deadline)
         return
     for p in payloads:                     # one device: the payloads run here, one after the other
-        if p["role"] == "tune":
+        if p["role"] == "call":
+            _call(ctx, p)
+        elif p["role"] == "tune":
             start = torch.load(p["start"], map_location="cpu", weights_only=False)
             tune_loop(ctx, start, Path(p["journal"]), p["worker"], deadline, Telemetry(Path(p["out"]), f"tune-w{p['worker']}"),
                       study_name=p.get("study"), keys=p.get("keys"), target=p.get("target"), grid=p.get("grid"))

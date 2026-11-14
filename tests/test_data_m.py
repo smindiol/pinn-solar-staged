@@ -1,0 +1,153 @@
+"""Level 2 invariants of data_m.py (base B, network M: r11 Sections 2-3, Eq. 25; S1, S3, S4)."""
+
+from __future__ import annotations
+
+import numpy as np
+import pytest
+
+from Staged_PINN_Solar import data, data_m, loss, pce
+from Staged_PINN_Solar.scaling import Scales
+
+needs_base_b = pytest.mark.skipif(not (data_m.local_root() / data_m.SPLIT_FILE).exists(),
+                                  reason="base_b not available")
+S = Scales()
+
+
+@pytest.fixture(scope="module")
+def rows():
+    return data_m.read_split(data_m.local_root())
+
+
+@pytest.fixture(scope="module")
+def refs(rows):
+    s = data_m.split_m(data_m.local_root(), rows)
+    return {r.uid: r for r in s.train + s.val + s.test}
+
+
+def _first(rows, origin, material):
+    r = next(r for r in rows if r["origin"] == origin and r["material"] == material)
+    return f"{r['material']}/{r['group']}", r
+
+
+#: one device per origin (and the materials beyond E1gen), the unit check of S3
+ORIGINS = [("E1A", "E1gen"), ("E1B", "E1gen"), ("dpvB2", "E1gen"), ("dpvB2", "Si"), ("dpvB1_cancelled", "InP")]
+
+
+@needs_base_b
+def test_base_m_split_counts_are_1621_203_200(rows) -> None:
+    """S4: split_m.csv holds 2024 devices, 1621 / 203 / 200, unique by <material>/<group> (group names repeat)."""
+    s = data_m.split_m(data_m.local_root(), rows)
+    assert (len(s.train), len(s.val), len(s.test)) == (1621, 203, 200)
+    uids = [r.uid for r in s.train + s.val + s.test]
+    assert len(set(uids)) == 2024
+    assert len({r.group for r in s.train + s.val + s.test}) < 2024           # the reason uid carries the material
+    assert {r.material for r in s.train} == set(data_m.MATERIALS)
+
+
+@needs_base_b
+@pytest.mark.parametrize("origin,material", ORIGINS)
+def test_base_m_device_unifies_the_coordinate_of_every_origin(rows, refs, origin, material) -> None:
+    """S3: x_hat = x / x[-1] in [0, 1]; delta = L_D(C0) / (L_n + L_p) whether x_cm was stored in Debye units (E1A,
+    E1B) or in cm (dpvB2, dpvB1_cancelled); G, potentials and stored currents on the same dimensionless convention:
+    the dPV reference closes Poisson and the contacts at round-off, continuity well below the floor, and the stored
+    currents reproduce the stored efficiency with P_in = 899.9167906 W/m^2."""
+    import h5py
+
+    uid, row = _first(rows, origin, material)
+    dev = data_m.load_device(refs[uid])
+    L = float(row["L_n"]) + float(row["L_p"])
+    assert dev.x_hat[0] == 0.0 and dev.x_hat[-1] == 1.0 and np.all(np.diff(dev.x_hat) > 0)
+    assert dev.delta(S) == pytest.approx(S.L_D / L, rel=1e-12)
+    with h5py.File(refs[uid].source, "r") as f:
+        x = f[refs[uid].key]["x_cm"][()]
+    stored_cm = x * S.L_D if origin in data_m.DEBYE_ORIGINS else x
+    assert np.allclose(dev.x_debye * S.L_D, stored_cm, rtol=1e-9, atol=0.0)
+    st = loss.ReferenceStatistics()
+    st.add(loss.reference_terms(dev, S))
+    rho = st.rho()
+    assert rho["poisson"] < 1e-15 and rho["bcn"] < 1e-15 and rho["bcp"] < 1e-15
+    assert rho["n"] < 1e-4 and rho["p"] < 1e-4
+    s = pce.jv_summary(np.asarray(dev.V), pce.terminal_current_stored(dev, S), dev.p_in_std)
+    assert dev.p_in_std == data_m.P_IN_STD
+    assert s["pce"] == pytest.approx(dev.pce, rel=1e-6)
+    assert np.allclose(dev.V, 0.05 * np.arange(len(dev.V)), atol=1e-9)
+
+
+@needs_base_b
+@pytest.mark.parametrize("origin,material", ORIGINS)
+def test_base_m_device_material_equals_its_attributes(rows, refs, origin, material) -> None:
+    """S2: per-device constants equal the group attributes (tn = tp = tau, Et = 0), made dimensionless with the
+    global C0 = 1e19, mu0 = 1; the doping step sits at L_n."""
+    import h5py
+
+    uid, _ = _first(rows, origin, material)
+    dev = data_m.load_device(refs[uid])
+    with h5py.File(refs[uid].source, "r") as f:
+        a = dict(f[refs[uid].key].attrs)
+    assert dev.material == {"Chi": a["Chi"], "Eg": a["Eg"], "eps": a["eps"], "Nc": a["Nc"], "Nv": a["Nv"],
+                            "mn": a["mn"], "mp": a["mp"], "tn": a["tau"], "tp": a["tau"], "Br": a["Br"], "Et": 0.0}
+    m = data.device_material(dev, S)
+    assert m.Nc[0] == pytest.approx(a["Nc"] / S.C0) and m.Nv[0] == pytest.approx(a["Nv"] / S.C0)
+    assert m.Eg[0] == pytest.approx(a["Eg"] / S.V_th) and m.chi[0] == pytest.approx(a["Chi"] / S.V_th)
+    assert m.eps_r[0] == a["eps"] and m.mu_n[0] == a["mn"] and m.mu_p[0] == a["mp"]
+    assert m.tau_n[0] == pytest.approx(a["tau"] / S.t0) and m.Et[0] == 0.0
+    assert m.Br[0] == pytest.approx(a["Br"] * S.C0 * S.t0)
+    x_cm = dev.x_debye * S.L_D
+    assert np.all(m.Ndop[x_cm <= a["L_n"] * (1 - 1e-6)] == pytest.approx(a["Nd_n"] / S.C0))
+    assert np.all(m.Ndop[x_cm > a["L_n"] * (1 + 1e-6)] == pytest.approx(-a["Na_p"] / S.C0))
+
+
+@needs_base_b
+def test_base_m_inputs_are_eleven_normalized_parameters(rows, refs) -> None:
+    """S1 / r11 Eq. 25: 11 inputs in order, log10 for Nd, Na, Nc, Nv, mn, mp, tau; min-max over the TRAINING
+    rows; train devices land in [0, 1] and the extremes are reached; chi, Br, A are not inputs."""
+    train = [r for r in rows if r["split"] == "train"]
+    specs = data_m.xi_specs(train)
+    assert [s[0] for s in specs] == ["Nd_n", "Na_p", "L_n", "L_p", "Eg", "Nc", "Nv", "eps", "mn", "mp", "tau"]
+    logs = {s[0] for s in specs if s[1] == "log"}
+    assert logs == {"Nd_n", "Na_p", "Nc", "Nv", "mn", "mp", "tau"}
+    assert not {"Chi", "Br", "A"} & {s[0] for s in specs}
+    U = np.stack([data_m.normalize_xi({k: float(r[k]) for k, _ in data_m.XI_PARAMS}, specs) for r in train])
+    assert U.shape == (1621, 11) and U.min() >= 0.0 and U.max() <= 1.0 + 1e-12
+    assert np.allclose(U.min(axis=0), 0.0) and np.allclose(U.max(axis=0), 1.0)
+    for origin, material in ORIGINS[:3]:
+        uid, row = _first(train, origin, material)
+        dev = data_m.load_device(refs[uid], specs)
+        assert dev.u.shape == (11,) and np.all((dev.u >= 0) & (dev.u <= 1 + 1e-12))
+
+
+@needs_base_b
+def test_base_m_bundle_reproduces_the_devices(rows, refs, tmp_path) -> None:
+    """write_bundle: one base_m.h5 (groups under /<material>/, names unchanged, so the colliding dpvB2__dev_000000
+    of three materials coexist) and split_m.csv; loading from the bundle gives the same devices."""
+    uids = ["Si/dpvB2__dev_000000", "CdTe/dpvB2__dev_000000", _first(rows, "E1A", "E1gen")[0]]
+    rec = data_m.write_bundle(tmp_path, data_m.local_root(), groups=uids)
+    assert rec["devices"] == 3 and (tmp_path / data_m.BUNDLE_FILE).exists()
+    assert data_m._has_files(tmp_path)
+    s = data_m.split_m(tmp_path)
+    got = {r.uid: r for r in s.train + s.val + s.test}
+    assert set(got) == set(uids)
+    for u in uids:
+        assert got[u].source.name == data_m.BUNDLE_FILE
+        a, b = data_m.load_device(refs[u]), data_m.load_device(got[u])
+        for f in ("V", "x_debye", "G", "phi_eq", "phi", "phi_n", "phi_p", "J_n", "J_p", "J"):
+            assert np.array_equal(getattr(a, f), getattr(b, f)), f
+        assert a.material == b.material and a.xi == b.xi and a.pce == b.pce
+
+
+def test_base_m_root_prefers_env_then_kaggle_input_then_workspace(tmp_path, monkeypatch) -> None:
+    """The data root: env DPV_BASE_M, else a directory under /kaggle/input with split_m.csv and the devices, else
+    the workspace's dpv-dataset/base_b. The Kaggle slug is the declared constant."""
+    assert data_m.BASE_M_DATASET == "sgarizado/dpv-pinn-base-m"
+    kaggle = tmp_path / "kaggle" / "input"
+    monkeypatch.setattr(data, "KAGGLE_INPUT", kaggle)
+    monkeypatch.delenv("DPV_BASE_M", raising=False)
+    assert data_m.default_root() == data_m.local_root()
+    found = kaggle / "dpv-pinn-base-m" / "v1"
+    found.mkdir(parents=True)
+    (found / data_m.SPLIT_FILE).write_text("group,split\n")
+    assert data_m.default_root() == data_m.local_root()              # no devices beside the csv: not a root
+    (found / data_m.BUNDLE_FILE).write_bytes(b"")
+    assert data_m.default_root() == found
+    monkeypatch.setenv("DPV_BASE_M", str(tmp_path / "elsewhere"))
+    assert data_m.default_root() == tmp_path / "elsewhere"

@@ -93,3 +93,12 @@ def default() -> Config:
 
 def smoke() -> Config:
     return Config(**SMOKE)
+
+
+#: Network M (r11, S5): 320 x 5 on n_in = 1 + 11 inputs (the 11 come from `data_m.XI_PARAMS`), same ansatz and
+#: activation as architecture A; every other field stays at its default.
+NETWORK_M = dict(width=320, depth=5)
+
+
+def network_m() -> Config:
+    return Config(**NETWORK_M)

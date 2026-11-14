@@ -102,6 +102,35 @@ class Bank:
         return len(self.uids)
 
 
+#: Material fields that vary per device in network M (base B); Ndop varies per node in both paths.
+MAT_FIELDS = ("Nc", "Nv", "chi", "Eg", "eps_r", "mu_n", "mu_p", "tau_n", "tau_p", "Et", "Br")
+
+
+@dataclass
+class BankM(Bank):
+    """A bank of network M: per-device dimensionless material constants (r11 Sec. 3, S2) beside Bank's arrays."""
+
+    mat: dict = None          # MAT_FIELDS name -> (D,)
+
+
+def rows_material(bank: Bank, rows, k: int, base: Material | None, ndop=0.0, as_tensor=None) -> Material:
+    """The material of devices `rows` of `bank`, each repeated `k` times as a (len(rows) k, 1) column, with `ndop`.
+    A bank without per-device material (architecture A) returns `base` with that Ndop, unchanged."""
+    mat = getattr(bank, "mat", None)
+    if mat is None:
+        return replace(base, Ndop=ndop)
+    col = lambda v: np.repeat(np.asarray(v)[rows], k)[:, None]
+    f = (lambda a: as_tensor(col(a))) if as_tensor is not None else col
+    return Material(**{n: f(mat[n]) for n in MAT_FIELDS}, Ndop=ndop)
+
+
+def batch_material(b: dict, key: str, base: Material | None, ndop) -> Material:
+    """The batch's per-node material `b[key]` (network M) or the constant `base` (architecture A), with `ndop`."""
+    if key in b:
+        return Material(**b[key], Ndop=ndop)
+    return replace(base, Ndop=ndop)
+
+
 def _union_specs(root: Path) -> tuple:
     """The four parameters of E1B (E1A fixes L_n, L_p): the network input is the same for every device."""
     import json
@@ -123,9 +152,10 @@ class _BankBuilder:
         if not np.allclose(dev.V, 0.05 * np.arange(n_v), atol=1e-9):
             raise ValueError(f"{dev.ref.uid}: the voltage grid is not V_j = 0.05 j")
         mat = data.device_material(dev, self.scales)
+        own = None if getattr(dev, "material", None) is None else {f: float(getattr(mat, f)[0]) for f in MAT_FIELDS}
         self.rows.append((dev.ref.uid, ansatz_mod.normalize_xi(dev.xi, self.specs), dev.delta(self.scales),
                           dev.x_hat, dev.G, mat.Ndop, float(dev.phi_eq[0]), float(dev.phi_eq[-1]), n_v,
-                          float(dev.pce), float(dev.p_in_std)))
+                          float(dev.pce), float(dev.p_in_std), own))
 
     def finish(self) -> Bank:
         r = self.rows
@@ -133,10 +163,16 @@ class _BankBuilder:
         if len(n_nodes) != 1:
             raise ValueError(f"devices have different node counts {sorted(n_nodes)}")
         col = lambda k, dt=np.float64: np.asarray([x[k] for x in r], dtype=dt)
-        return Bank(uids=[x[0] for x in r], xi_hat=np.stack([x[1] for x in r]), delta=col(2),
-                    x_hat=np.stack([x[3] for x in r]), G=np.stack([x[4] for x in r]),
-                    Ndop=np.stack([x[5] for x in r]), phi_eq0=col(6), phi_eq1=col(7),
-                    n_V=col(8, np.int64), pce=col(9), p_in_std=col(10))
+        kw = dict(uids=[x[0] for x in r], xi_hat=np.stack([x[1] for x in r]), delta=col(2),
+                  x_hat=np.stack([x[3] for x in r]), G=np.stack([x[4] for x in r]),
+                  Ndop=np.stack([x[5] for x in r]), phi_eq0=col(6), phi_eq1=col(7),
+                  n_V=col(8, np.int64), pce=col(9), p_in_std=col(10))
+        own = [x[11] for x in r]
+        if all(m is None for m in own):
+            return Bank(**kw)
+        if any(m is None for m in own):
+            raise ValueError("a bank mixes devices with and without per-device material")
+        return BankM(**kw, mat={f: np.asarray([m[f] for m in own]) for f in MAT_FIELDS})
 
 
 @dataclass
@@ -243,7 +279,18 @@ def _gather(bank: Bank, pick: np.ndarray, idx: np.ndarray, dev) -> dict:
         "peq0c": _t(rep2(bank.phi_eq0), dev), "peq1c": _t(rep2(bank.phi_eq1), dev),
         "phi_eq": _t(np.stack([bank.phi_eq0[pick], bank.phi_eq1[pick]], axis=1), dev),
         "devices": pick,
+        **_gather_material(bank, pick, k, dev),
     }
+
+
+def _gather_material(bank: Bank, pick: np.ndarray, k: int, dev) -> dict:
+    """Network M: per-node ("mat", k nodes per device) and per-contact ("matc", 2 per device) material columns.
+    Nothing for architecture A, whose batches stay exactly as they were."""
+    mat = getattr(bank, "mat", None)
+    if mat is None:
+        return {}
+    return {"mat": {f: _t(np.repeat(mat[f][pick], k)[:, None], dev) for f in MAT_FIELDS},
+            "matc": {f: _t(np.repeat(mat[f][pick], 2)[:, None], dev) for f in MAT_FIELDS}}
 
 
 # --- residuals and loss ----------------------------------------------------------------------------
@@ -251,7 +298,7 @@ def term_summands(model, b: dict, V_tilde: float, mat: Material, contacts) -> di
     """Summands T_iq of Eqs. (5), (7), (9) on a batch, by autograd on the ansatz `model(x, xi, peq0, peq1, V_tilde)`."""
     x = b["x"].clone().requires_grad_(True)
     phi, phi_n, phi_p = model(x, b["xi"], b["peq0"], b["peq1"], V_tilde)
-    m = replace(mat, Ndop=b["ndop"]).like(phi)
+    m = batch_material(b, "mat", mat, b["ndop"]).like(phi)
     n, p = carriers.electron_density(phi, phi_n, m), carriers.hole_density(phi, phi_p, m)
     R = carriers.recombination(n, p, m)
     d = lambda y, v: residuals.autograd_derivative(y, v)
@@ -264,11 +311,12 @@ def term_summands(model, b: dict, V_tilde: float, mat: Material, contacts) -> di
              "p": residuals.continuity_p_terms(d(Jp, x), b["G"], R, delta)}
     xc = b["xc"].clone().requires_grad_(True)
     phic, phin_c, phip_c = model(xc, b["xic"], b["peq0c"], b["peq1c"], V_tilde)
-    mc = replace(mat, Ndop=0.0 * phic).like(phic)
+    mc = batch_material(b, "matc", mat, 0.0 * phic).like(phic)
     nc, pc = carriers.electron_density(phic, phin_c, mc), carriers.hole_density(phic, phip_c, mc)
     Jnc = residuals.current_density(mc.mu_n, nc, d(phin_c, xc), b["deltac"]).reshape(-1, 2)
     Jpc = residuals.current_density(mc.mu_p, pc, d(phip_c, xc), b["deltac"]).reshape(-1, 2)
-    n_eq, p_eq = carriers.equilibrium_densities(b["phi_eq"], mc)
+    mce = mc if "matc" not in b else Material(**{f: getattr(mc, f).reshape(-1, 2) for f in MAT_FIELDS}, Ndop=0.0)
+    n_eq, p_eq = carriers.equilibrium_densities(b["phi_eq"], mce.like(phic))
     nc, pc = nc.reshape(-1, 2), pc.reshape(-1, 2)
     terms["bcn"] = residuals.contact_n_terms(Jnc, nc, n_eq, np.array([contacts.S_n0, contacts.S_n1]))
     terms["bcp"] = residuals.contact_p_terms(Jpc, pc, p_eq, np.array([contacts.S_p0, contacts.S_p1]))
@@ -420,7 +468,8 @@ def evaluate_currents(model, bank: Bank, V_tilde: float, mat: Material, scales: 
             phi, phi_n, phi_p = model(x, _t(np.repeat(bank.xi_hat[sl], N, axis=0), dev),
                                       rep(bank.phi_eq0), rep(bank.phi_eq1), V_tilde)
         shape = lambda t: t.reshape(c, N)
-        mm = mat.like(shape(phi))
+        mm = rows_material(bank, np.arange(sl.start, sl.stop), 1, mat, mat.Ndop if mat is not None else 0.0)
+        mm = mm.like(shape(phi))
         out[sl] = gr_current(shape(phi), shape(phi_n), shape(phi_p), mm, bank.G[sl], bank.x_hat[sl],
                              bank.delta[sl], contacts, scales)
     return out
@@ -438,7 +487,8 @@ def evaluate_currents_flux(model, bank: Bank, V_tilde: float, mat: Material, sca
         with torch.enable_grad():
             phi, phi_n, phi_p = model(x, _t(np.repeat(bank.xi_hat[sl], N, axis=0), dev),
                                       rep(bank.phi_eq0), rep(bank.phi_eq1), V_tilde)
-            m = mat.like(phi)
+            m = rows_material(bank, np.arange(sl.start, sl.stop), N, mat,
+                              mat.Ndop if mat is not None else 0.0).like(phi)
             n, p = carriers.electron_density(phi, phi_n, m), carriers.hole_density(phi, phi_p, m)
             dn = torch.autograd.grad(phi_n.sum(), x, retain_graph=True)[0]
             dp = torch.autograd.grad(phi_p.sum(), x)[0]

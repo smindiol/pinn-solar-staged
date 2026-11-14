@@ -157,6 +157,7 @@ class Device:
     xi_specs: tuple = ()     # per active parameter: (name, scale 'log'|'lin', min, max)
     J: np.ndarray | None = None   # dPV terminal current per voltage [A/cm^2] (Eq. 13)
     p_in_std: float = 899.9167906040965   # standard-spectrum power of Eq. 14's denominator [W/m^2]
+    material: dict | None = None  # per-device material constants in E1_MATERIAL's keys (base B); None = E1_MATERIAL
 
     def delta(self, scales: Scales) -> float:
         """Eq. (2): delta = L_D / L_total = 1 / x_D(L_total)."""
@@ -214,8 +215,10 @@ def load_device(ref: DeviceRef) -> Device:
 
 
 def device_material(dev: Device, scales: Scales) -> Material:
-    """Dimensionless E1 material with the device's doping step (layer 1 holds x <= L_n)."""
-    m, n = E1_MATERIAL, len(dev.x_debye)
+    """Dimensionless material with the device's doping step (layer 1 holds x <= L_n): the device's own
+    constants when it carries them (base B, network M), the E1 constants otherwise (architecture A)."""
+    own = getattr(dev, "material", None)
+    m, n = (E1_MATERIAL if own is None else own), len(dev.x_debye)
     x_cm = dev.x_debye * scales.L_D
     L_n = dev.xi["L_n"]
     donor = x_cm <= L_n * (1.0 + 1e-9)
