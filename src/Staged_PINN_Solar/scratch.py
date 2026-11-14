@@ -136,6 +136,22 @@ def run_final(account: int) -> list:
     return [u for p in packs for u in p if steps.is_complete(out / f"{u}.json")]
 
 
+def run_final_seed(seed: int = 0) -> list:
+    """One seed of the scratch final on one account (operator 2026-11-14: one seed first, the rest only if it
+    converges): the seed's 24 stages split over the account's two GPUs (p0of2, p1of2), then merged."""
+    start = time.time()
+    deadline = start + HOURS["final"] * 3600.0
+    out = e6.results_dir()
+    out.mkdir(parents=True, exist_ok=True)
+    lam = e6._lambda_file(BEST)
+    ctx = e6.build_ctx()
+    units = [f"{UNIT}{seed}.p{p}of2" for p in range(2)]
+    e6._run_payloads([{"role": "final", "units": [u], "lambda": lam, "out": str(out), "deadline": deadline,
+                       "scratch": True, "adam_max": ADAM, "lbfgs_max": LBFGS, "tau": TAU} for u in units], ctx, deadline)
+    e6.merge_parts(out, ctx.prep, f"{UNIT}{seed}")
+    return [u for u in units if steps.is_complete(out / f"{u}.json")]
+
+
 def _history(out: Path, name: str) -> list:
     p = out / f"{name}.history.jsonl"
     return [json.loads(line) for line in p.read_text().splitlines() if line.strip()] if p.exists() else []
