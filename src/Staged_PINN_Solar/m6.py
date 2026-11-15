@@ -510,3 +510,8 @@ def run_seeds_23() -> dict:
 
 def run_seeds_45() -> dict:
     return run_kernel((4, 5))
+
+
+def run_smoke() -> dict:
+    """Kaggle smoke (~5 min): both GPUs, seeds 0 and 1, every arm, a few steps of each phase."""
+    return run_kernel((0, 1), pre_epochs=1, adam_steps=20, lbfgs_iters=10, hours=0.15)
