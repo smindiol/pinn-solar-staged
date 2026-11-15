@@ -484,6 +484,7 @@ def _worker(gpu: int, seeds: list, kw: dict):
 def run_kernel(seeds=(0, 1), **kw) -> dict:
     """Kaggle entry: one seed per GPU, in parallel processes; on a single device the seeds run in turn."""
     seeds = list(seeds)
+    kw.setdefault("root", str(m6_data.ensure(kw.get("root"))))    # build once, before the GPU processes start
     n = torch.cuda.device_count()
     if n >= len(seeds) and len(seeds) > 1:
         torch.multiprocessing.spawn(_worker, args=(seeds, kw), nprocs=len(seeds), join=True)
