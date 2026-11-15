@@ -16,6 +16,7 @@ The file `base_m6.h5` holds everything a run needs, so a Kaggle kernel never rea
 from __future__ import annotations
 
 import json
+import os
 import time
 from pathlib import Path
 
@@ -142,7 +143,6 @@ def build(out_dir, root=None, limit: int | None = None, report=print) -> dict:
 
 def default_root() -> Path:
     """Env DPV_BASE_M6, then any /kaggle/input/**/base_m6.h5, then the workspace copy."""
-    import os
     env = os.environ.get("DPV_BASE_M6")
     if env:
         return Path(env)
@@ -152,9 +152,21 @@ def default_root() -> Path:
     return data_m.local_root().parent / "base_m6"
 
 
+def ensure(root=None) -> Path:
+    """The folder holding base_m6.h5; when absent (a Kaggle kernel without the m6 dataset attached) it is built
+    deterministically from base M (fixed node seed, same split order), into the working directory."""
+    root = Path(root) if root else default_root()
+    if (root / FILE).is_file():
+        return root
+    built = Path(os.environ.get("DPV_BASE_M6_BUILD", "base_m6"))
+    if not (built / FILE).is_file():
+        build(built)
+    return built
+
+
 def load(root=None) -> dict:
     """Every array of base_m6.h5 in memory (float64 except the float32 targets)."""
-    root = Path(root) if root else default_root()
+    root = ensure(root)
     out = {}
     with h5py.File(root / FILE, "r") as f:
         out["attrs"] = {k: (json.loads(v) if k in ("specs", "splits", "nodes") else float(v))
