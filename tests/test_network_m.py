@@ -38,7 +38,7 @@ def test_network_m_has_twelve_inputs_and_267267_parameters() -> None:
 @pytest.fixture(scope="module")
 def pair():
     """E1A (E1gen) and dpvB2 Si: banked together (BankM) with a small model on their bounds."""
-    rows = data_m.read_split(data_m.local_root())
+    rows = data_m.read_split(data_m.local_root(), origins=None)
     s = data_m.split_m(data_m.local_root(), rows)
     refs = {r.uid: r for r in s.train + s.val + s.test}
     a = next(r for r in rows if r["origin"] == "E1A")
