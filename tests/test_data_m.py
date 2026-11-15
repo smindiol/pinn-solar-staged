@@ -152,13 +152,13 @@ def test_base_m_bundle_reproduces_the_devices(rows, refs, tmp_path) -> None:
 def test_base_m_root_prefers_env_then_kaggle_input_then_workspace(tmp_path, monkeypatch) -> None:
     """The data root: env DPV_BASE_M, else a directory under /kaggle/input with split_m.csv and the devices, else
     the workspace's dpv-dataset/base_b. The Kaggle slug is the declared constant."""
-    assert data_m.BASE_M_DATASET == "sebastianmindiola/dpv-pinn-base-m"
+    assert data_m.BASE_M_DATASET == "sebastianmindiola/dpv-pinn-base-m-dpvb2"
     assert data_m.BASE_M_OWNERS[0] == "sebastianmindiola"
     kaggle = tmp_path / "kaggle" / "input"
     monkeypatch.setattr(data, "KAGGLE_INPUT", kaggle)
     monkeypatch.delenv("DPV_BASE_M", raising=False)
     assert data_m.default_root() == data_m.local_root()
-    found = kaggle / "dpv-pinn-base-m" / "v1"
+    found = kaggle / "dpv-pinn-base-m-dpvb2" / "v1"
     found.mkdir(parents=True)
     (found / data_m.SPLIT_FILE).write_text("group,split\n")
     assert data_m.default_root() == data_m.local_root()              # no devices beside the csv: not a root
@@ -187,5 +187,5 @@ def test_ensure_dataset_tries_each_private_owner_copy(tmp_path, monkeypatch):
     monkeypatch.delenv("DPV_BASE_M", raising=False)
     got = data_m.ensure_dataset(root=tmp_path / "empty")
     assert got == tmp_path
-    assert calls == ["sebastianmindiola/dpv-pinn-base-m", "sgarizado/dpv-pinn-base-m",
-                     "macrosomindiola/dpv-pinn-base-m", "macrosomindiola/dpv-pinn-base-m"]
+    assert calls == ["sebastianmindiola/dpv-pinn-base-m-dpvb2", "sgarizado/dpv-pinn-base-m-dpvb2",
+                     "macrosomindiola/dpv-pinn-base-m-dpvb2", "macrosomindiola/dpv-pinn-base-m-dpvb2"]

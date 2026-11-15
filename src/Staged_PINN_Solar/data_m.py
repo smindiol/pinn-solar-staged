@@ -50,10 +50,10 @@ __provenance__ = {
     ],
 }
 
-BASE_M_DATASET = "sebastianmindiola/dpv-pinn-base-m"   # public Kaggle dataset of the bundle (base_m.h5 + split_m.csv)
+BASE_M_DATASET = "sebastianmindiola/dpv-pinn-base-m-dpvb2"   # public Kaggle dataset: the dpvB2-only bundle (2026-11-15)
 #: Owners tried in order: the public copy first (readable from every account), then any private per-account copy.
 BASE_M_OWNERS = ("sebastianmindiola", "sgarizado", "macrosomindiola", "tianmindiola")
-BASE_M_NAME = "dpv-pinn-base-m"
+BASE_M_NAME = "dpv-pinn-base-m-dpvb2"
 SPLIT_FILE = "split_m.csv"
 BUNDLE_FILE = "base_m.h5"
 MATERIALS = ("E1gen", "InP", "CdTe", "Si")
@@ -105,7 +105,7 @@ def default_root() -> Path:
 
 def ensure_dataset(slug: str | None = None, root=None) -> Path:
     """The root, downloading the bundle (base_m.h5, split_m.csv) with kagglehub when `default_root()` lacks it.
-    Without `slug`, env DPV_BASE_M_DATASET, else `<owner>/dpv-pinn-base-m` for each owner of BASE_M_OWNERS in turn
+    Without `slug`, env DPV_BASE_M_DATASET, else `<owner>/<BASE_M_NAME>` for each owner of BASE_M_OWNERS in turn
     (a private copy is visible only to its own account's kernels)."""
     root = Path(root) if root else default_root()
     if _has_files(root):
