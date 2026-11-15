@@ -110,7 +110,8 @@ def _snapshot(ctx, model, obj, params, lam, j) -> dict:
             "field_error_val": e6.field_error(ctx, model, "val", j)}
 
 
-def run_stage(ctx, variant: str, pre_j: dict, lam0: dict, j: int, tel, n_steps: int = STEPS) -> dict:
+def run_stage(ctx, variant: str, pre_j: dict, lam0: dict, j: int, tel, n_steps: int = STEPS,
+              stage_no: int = 1, n_stages: int = 1) -> dict:
     """STEPS Adam steps on stage j from theta_pre of that stage, with `variant`'s gradient."""
     if variant not in VARIANTS:
         raise ValueError(f"variant {variant!r}: one of {VARIANTS}")
@@ -150,10 +151,11 @@ def run_stage(ctx, variant: str, pre_j: dict, lam0: dict, j: int, tel, n_steps: 
             rate = (time.time() - t0) / (s + 1)
             tel.log(kind="step", variant=variant, stage=j, step=s, total=float(total), terms=terms,
                     conflicts=n_conf, **{"lambda": lam})
-            tel.line(f"stage {j} · step {s + 1}/{n_steps} · loss {float(total):.3e} · n {terms['n']:.3e} · "
-                     f"p {terms['p']:.3e} · J {terms.get('J', float('nan')):.3e}"
-                     + (f" · conflicts {n_conf}" if n_conf is not None else "")
-                     + f" · {rate:.2f} s/step · stage ETA {(n_steps - s - 1) * rate / 60:.1f} min")
+            tel.line(f"{variant} · stage {j} ({stage_no}/{n_stages}) · Adam step {s + 1}/{n_steps} · "
+                     f"total {float(total):.3e} | " + " ".join(f"{k} {v:.3e}" for k, v in terms.items())
+                     + (f" | conflicts {n_conf}" if n_conf is not None else
+                        " | lambda " + " ".join(f"{k} {v:.3g}" for k, v in lam.items()))
+                     + f" | {rate:.2f} s/step · stage ETA {(n_steps - s - 1) * rate / 60:.1f} min")
     end = _snapshot(ctx, model, obj, params, lam, j)
     return {"variant": variant, "stage": j, "steps": n_steps, "seconds": time.time() - t0, "diverged": diverged,
             "start": start, "end": end, "lambda_start": lam0, "lambda_end": lam, "lambda_trajectory": lam_traj,
@@ -177,13 +179,13 @@ def diag_worker(ctx, a: dict) -> None:
         if time.time() > a["deadline"] - 600:
             tel.line(f"wall budget: stage {j} not started")
             return
-        rec = run_stage(ctx, a["variant"], pre[j], a["lambda"], j, tel, a.get("steps", STEPS))
+        rec = run_stage(ctx, a["variant"], pre[j], a["lambda"], j, tel, a.get("steps", STEPS), i + 1, len(a["stages"]))
         torch.save(rec.pop("model"), out / f"e7md-{a['variant']}-j{j:02d}.pt")
         steps._write(f, rec)
         tel.line(f"stage {j} done ({i + 1}/{len(a['stages'])}): current error val "
-                 f"{rec['start']['current_error_val']:.3e} -> {rec['end']['current_error_val']:.3e} · "
-                 f"n {rec['start']['terms']['n']:.3e} -> {rec['end']['terms']['n']:.3e} · "
-                 f"p {rec['start']['terms']['p']:.3e} -> {rec['end']['terms']['p']:.3e}")
+                 f"{rec['start']['current_error_val']:.3e} -> {rec['end']['current_error_val']:.3e} | "
+                 + " ".join(f"{k} {rec['start']['terms'][k]:.2e}->{rec['end']['terms'][k]:.2e}"
+                            for k in rec['end']['terms']))
 
 
 def summarize(out: Path, variant: str) -> dict:
