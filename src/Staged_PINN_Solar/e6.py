@@ -143,18 +143,26 @@ def build_ctx(cfg: Config | None = None, report=print) -> Ctx:
     return Ctx(prep, fields, cfg, K, currents)
 
 
+#: attributes other modules attach to a Ctx (m5: per-split r13 scales and s_K) that the GPU workers need too
+CTX_EXTRAS = ("r13", "sK")
+
+
 def _save_ctx(ctx: Ctx) -> str:
     path = Path(tempfile.gettempdir()) / "e6-ctx.pkl"
     with open(path, "wb") as f:
         pickle.dump({"prep": ctx.prep, "fields": ctx.fields, "cfg": ctx.cfg, "K": ctx.K,
-                     "currents": ctx.currents}, f, protocol=5)
+                     "currents": ctx.currents, "extra": {k: getattr(ctx, k) for k in CTX_EXTRAS if hasattr(ctx, k)}},
+                    f, protocol=5)
     return str(path)
 
 
 def _load_ctx(path: str) -> Ctx:
     with open(path, "rb") as f:
         d = pickle.load(f)
-    return Ctx(d["prep"], d["fields"], d["cfg"], d["K"], d["currents"])
+    ctx = Ctx(d["prep"], d["fields"], d["cfg"], d["K"], d["currents"])
+    for k, v in d.get("extra", {}).items():
+        setattr(ctx, k, v)
+    return ctx
 
 
 # --- batches and the loss ------------------------------------------------------------------------------

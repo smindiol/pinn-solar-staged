@@ -102,3 +102,11 @@ def test_smoke_runs_on_a_tiny_cpu_context(ctx, tmp_path, monkeypatch) -> None:
     assert set(rec["end"]["terms"]) == set(m5.TERMS) and rec["steps"] == 3
     assert {"current_rel", "pce_bound_pp"} <= set(rec["end"])
     assert s["stages"] == [0, 1] and "val_pce_final" in s and "val_pce_pretrained_control" in s
+
+
+@needs_base_b
+def test_gpu_workers_receive_the_r13_scales(ctx) -> None:
+    """Regression (e8smoke 2026-11-15): the context handed to each GPU worker carries ctx.r13 and ctx.sK."""
+    back = e6._load_ctx(e6._save_ctx(ctx))
+    assert back.sK == ctx.sK and set(back.r13) == set(ctx.r13)
+    assert np.array_equal(back.r13["val"]["Jgen"], ctx.r13["val"]["Jgen"])
