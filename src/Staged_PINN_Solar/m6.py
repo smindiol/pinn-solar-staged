@@ -21,6 +21,8 @@ from pathlib import Path
 import numpy as np
 import torch
 
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
 from . import carriers, m6_data, pce, steps
 
 __provenance__ = {
@@ -40,6 +42,7 @@ WIDTH, DEPTH = 256, 5
 PRE_EPOCHS, PRE_LR, N_DEV = 300, 1e-3, 64
 ADAM_STEPS, ADAM_LR, LR_MIN, CLIP = 3000, 1e-4, 5e-6, 1.0
 LBFGS_ITERS = 500
+N_DEV_PHYS = 16                        # T4 OOM at 64 devices x 32 nodes with the second derivative (smoke 2026-11-15)
 NODES_DATA, NODES_PHYS = 64, 32        # nodes per (device, voltage) drawn per step from the 250 fixed ones
 EVERY = 25
 CKPT_SECONDS = 15 * 60
@@ -344,12 +347,12 @@ def pretrain(ctx, model, seed, log, epochs=PRE_EPOCHS, deadline=None) -> dict:
     return {"first": first, "last": float(loss), "steps": i + 1, "seconds": time.time() - t0}
 
 
-def measure(ctx, model, seed, n_batches: int = 4) -> dict:
+def measure(ctx, model, seed, n_batches: int = 16) -> dict:
     """Mean of every term at theta_pre over fixed batches (seeded), for Eq. 39."""
     rng = np.random.default_rng(2000 + seed)
     acc = {}
     for _ in range(n_batches):
-        b = batch(ctx, "train", rng, N_DEV, NODES_PHYS)
+        b = batch(ctx, "train", rng, N_DEV_PHYS, NODES_PHYS)
         L = terms(model, b, (1, 1, 1))
         for k, v in L.items():
             acc[k] = acc.get(k, 0.0) + float(v) / n_batches
@@ -360,13 +363,14 @@ def train_arm(ctx, model, arm, lam, seed, log, out, adam_steps=ADAM_STEPS, lbfgs
               deadline=None) -> dict:
     abc = ARMS[arm]
     nodes = NODES_PHYS if any(abc) else NODES_DATA
+    n_dev = N_DEV_PHYS if any(abc) else N_DEV
     opt = torch.optim.Adam(model.parameters(), lr=ADAM_LR)
     sch = _cosine(opt, adam_steps, ADAM_LR, LR_MIN)
     rng = np.random.default_rng(3000 + seed)
     t0, last_ck = time.time(), time.time()
     start = None
     for i in range(adam_steps):
-        b = batch(ctx, "train", rng, N_DEV, nodes)
+        b = batch(ctx, "train", rng, n_dev, nodes)
         L = terms(model, b, abc)
         loss = total(L, lam, abc)
         if not torch.isfinite(loss):
@@ -395,7 +399,7 @@ def train_arm(ctx, model, arm, lam, seed, log, out, adam_steps=ADAM_STEPS, lbfgs
     end_adam = {k: float(v) for k, v in L.items()}
     torch.save({"state": _state(model)}, out / f"{arm}.adam.pt")
     # L-BFGS on one fixed batch with the same loss (Eq. 38, same lambda)
-    lb = batch(ctx, "train", np.random.default_rng(4000 + seed), N_DEV, nodes)
+    lb = batch(ctx, "train", np.random.default_rng(4000 + seed), n_dev, nodes)
     lopt = torch.optim.LBFGS(model.parameters(), lr=1.0, max_iter=lbfgs_iters, max_eval=int(1.25 * lbfgs_iters),
                              history_size=50, tolerance_grad=1e-12, tolerance_change=1e-15,
                              line_search_fn="strong_wolfe")
