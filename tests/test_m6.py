@@ -51,6 +51,11 @@ def test_m6_output_transform_imposes_the_six_contact_conditions(tiny):
     from Staged_PINN_Solar import carriers
     n0 = carriers.electron_density(phi0, pn0, m)
     p1 = carriers.hole_density(phi1, pp1, m)
+    model.net[-1].bias.data.normal_(0, 0.3)
+    phi0, pn0, _, Jn0, Jp0 = model(one * 0, q)
+    phi1, _, pp1, Jn1, Jp1 = model(one, q)
+    n0 = carriers.electron_density(phi0, pn0, m)
+    p1 = carriers.hole_density(phi1, pp1, m)
     n_eq0 = q["A_n"] / ctx.attrs["S_n0"]
     p_eq1 = q["A_p"] / ctx.attrs["S_p1"]
     assert torch.allclose(phi0, q["phi_eq0"]) and torch.allclose(phi1, q["phi_eq1"] + q["Vt"])

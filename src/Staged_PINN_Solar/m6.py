@@ -126,9 +126,15 @@ class M6(torch.nn.Module):
             r1 = self.raw(torch.ones_like(s), q["xi"], q["v"])
         col = lambda a, k: a[:, k:k + 1]
         phi = (1 - s) * q["phi_eq0"] + s * (q["phi_eq1"] + q["Vt"]) + s * (1 - s) * col(r, 0)
-        Jn = (1 - s) * (q["A_n"] * torch.expm1(col(r0, 1)) + s * q["Jgen"] * col(r, 3))
-        Jp = s * (q["A_p"] * torch.expm1(-(col(r1, 2) + q["Vt"])) + (1 - s) * q["Jgen"] * col(r, 4))
-        return phi, col(r, 1), col(r, 2), Jn, Jp
+        a_n, b_p = col(r0, 3), col(r1, 4)                     # scaled contact currents j_n(0), j_p(1)
+        # r15: the ohmic contacts solved for the potential, phi_n(0) = ln(1 + J_gen a_n / A_n) and
+        # phi_p(1) = -V - ln(1 + J_gen b_p / A_p), so J_n(0) = A_n (e^{phi_n(0)} - 1) and J_p(1) likewise hold exactly
+        ln = lambda z: torch.log(torch.clamp(1 + z, min=1e-300))
+        pn = ln(q["Jgen"] * a_n / q["A_n"]) + s * col(r, 1)
+        pp = -q["Vt"] - ln(q["Jgen"] * b_p / q["A_p"]) - (1 - s) * col(r, 2)
+        Jn = q["Jgen"] * (1 - s) * (a_n + s * col(r, 3))
+        Jp = q["Jgen"] * s * (b_p + (1 - s) * col(r, 4))
+        return phi, pn, pp, Jn, Jp
 
 
 def new_model(ctx: Ctx, seed: int) -> M6:
@@ -211,9 +217,11 @@ def residuals(model, b, want=PHYS_TERMS) -> dict:
     if "P" in want:
         out["P"] = q["eps_r"] * dl ** 2 * d(d(phi)) - (n - p - q["Ndop"])
     if "Kn" in want:
-        out["Kn"] = (Jn - q["mu_n"] * n * dl * d(pn)) / q["Jgen"]
+        gn = q["mu_n"] * n * dl / q["Jgen"]                 # r15: conductance over J_gen, spans ~1e-4..1e5
+        out["Kn"] = (Jn / q["Jgen"] - gn * d(pn)) / (1 + gn)
     if "Kp" in want:
-        out["Kp"] = (Jp - q["mu_p"] * p * dl * d(pp)) / q["Jgen"]
+        gp = q["mu_p"] * p * dl / q["Jgen"]
+        out["Kp"] = (Jp / q["Jgen"] - gp * d(pp)) / (1 + gp)
     if "Cn" in want or "Cp" in want:
         RG = carriers.recombination(n, p, m) - q["G"]
         out["Cn"] = (dl * d(Jn) - RG) / q["Gbar"]
@@ -259,7 +267,7 @@ def predicted_currents(ctx: Ctx, model, split: str = "val") -> dict:
     pd_t, pv_t = T(pd), T(pv)
     s0 = torch.zeros(pd.size, 1, dtype=torch.float64, device=ctx.dev)
     r0 = model.raw(s0, ctx.xi[pd_t], (ctx.V[pd_t, pv_t] / ctx.V_max)[:, None])
-    J = (ctx.attrs["J0"] * ctx.devc["A_n"][pd_t] * torch.expm1(r0[:, 1])).cpu().numpy()
+    J = (ctx.attrs["J0"] * ctx.devc["Jgen"][pd_t] * r0[:, 3]).cpu().numpy()      # J = J0 J_gen j_n(0)
     for d in ids:
         out[int(d)] = J[pd == d]
     return out
