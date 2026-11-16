@@ -37,7 +37,7 @@ __provenance__ = {
     ],
 }
 
-TAG = "e9"
+TAG = "e9b"
 WIDTH, DEPTH = 256, 5
 PRE_EPOCHS, PRE_LR, N_DEV = 300, 1e-3, 64
 ADAM_STEPS, ADAM_LR, LR_MIN, CLIP = 3000, 1e-4, 5e-6, 1.0
@@ -81,6 +81,7 @@ class Ctx:
         p_eq1 = d["Nv"] * np.exp(-d["chi"] - d["Eg"] - d["phi_eq1"])
         self.devc["A_n"] = t(self.attrs["S_n0"] * n_eq0)
         self.devc["A_p"] = t(self.attrs["S_p1"] * p_eq1)
+        self.devc["Jgen"] = t(d["Gbar"] / d["delta"])                          # r13 Eq. 28: J_gen = G_bar / delta
         self.xi = t(raw["xi_hat"][keep])
         self.V = t(np.nan_to_num(self.V_np))
         self.Vt = self.V / V_th
@@ -93,7 +94,7 @@ class Ctx:
         f = raw["fields"][keep][tr]
         c = raw["currents"][keep][tr]
         self.out_scale = torch.tensor([np.nanstd(f[:, :, 0]), np.nanstd(f[:, :, 1]), np.nanstd(f[:, :, 2]),
-                                       np.nanstd(c[:, :, 0]), np.nanstd(c[:, :, 1])], dtype=torch.float64)
+                                       1.0, 1.0], dtype=torch.float64)    # u_n, u_p are scaled currents j = J / J_gen
 
     @classmethod
     def load(cls, root=None, dev=None, limit=None):
@@ -125,8 +126,8 @@ class M6(torch.nn.Module):
             r1 = self.raw(torch.ones_like(s), q["xi"], q["v"])
         col = lambda a, k: a[:, k:k + 1]
         phi = (1 - s) * q["phi_eq0"] + s * (q["phi_eq1"] + q["Vt"]) + s * (1 - s) * col(r, 0)
-        Jn = (1 - s) * (q["A_n"] * torch.expm1(col(r0, 1)) + s * col(r, 3))
-        Jp = s * (q["A_p"] * torch.expm1(-(col(r1, 2) + q["Vt"])) + (1 - s) * col(r, 4))
+        Jn = (1 - s) * (q["A_n"] * torch.expm1(col(r0, 1)) + s * q["Jgen"] * col(r, 3))
+        Jp = s * (q["A_p"] * torch.expm1(-(col(r1, 2) + q["Vt"])) + (1 - s) * q["Jgen"] * col(r, 4))
         return phi, col(r, 1), col(r, 2), Jn, Jp
 
 
@@ -161,7 +162,7 @@ def gather(ctx: Ctx, pd, pv, rd, rv, rp, rn) -> dict:
     c = lambda a, i: a[i][:, None]
     pair = {"xi": ctx.xi[pd_t], "v": (ctx.V[pd_t, pv_t] / ctx.V_max)[:, None]}
     q = {"xi": ctx.xi[rd_t], "v": (ctx.V[rd_t, rv_t] / ctx.V_max)[:, None], "Vt": ctx.Vt[rd_t, rv_t][:, None]}
-    for k in ("phi_eq0", "phi_eq1", "A_n", "A_p", "delta") + m6_data.MAT_KEYS:
+    for k in ("phi_eq0", "phi_eq1", "A_n", "A_p", "delta", "Jgen", "Gbar") + m6_data.MAT_KEYS:
         q[k] = c(ctx.devc[k], rd_t)
     for k in ("s", "s_mid", "G", "Ndop"):
         q[k] = ctx.nodes[k][rd_t, rn_t][:, None]
@@ -191,7 +192,7 @@ def data_terms(model, b) -> dict:
     phi, pn, pp, _, _ = model(q["s"], q, r0, r1)
     _, _, _, Jn, Jp = model(q["s_mid"], q, r0, r1)
     e = torch.cat([phi, pn, pp], 1) - q["target"]
-    j = torch.cat([Jn, Jp], 1) - q["jtarget"]
+    j = (torch.cat([Jn, Jp], 1) - q["jtarget"]) / q["Jgen"]          # scaled currents j = J / J_gen (r15)
     return {"phi": (e[:, 0] ** 2).mean(), "phi_n": (e[:, 1] ** 2).mean(), "phi_p": (e[:, 2] ** 2).mean(),
             "J_n": (j[:, 0] ** 2).mean(), "J_p": (j[:, 1] ** 2).mean()}
 
@@ -210,13 +211,13 @@ def residuals(model, b, want=PHYS_TERMS) -> dict:
     if "P" in want:
         out["P"] = q["eps_r"] * dl ** 2 * d(d(phi)) - (n - p - q["Ndop"])
     if "Kn" in want:
-        out["Kn"] = Jn - q["mu_n"] * n * dl * d(pn)
+        out["Kn"] = (Jn - q["mu_n"] * n * dl * d(pn)) / q["Jgen"]
     if "Kp" in want:
-        out["Kp"] = Jp - q["mu_p"] * p * dl * d(pp)
+        out["Kp"] = (Jp - q["mu_p"] * p * dl * d(pp)) / q["Jgen"]
     if "Cn" in want or "Cp" in want:
         RG = carriers.recombination(n, p, m) - q["G"]
-        out["Cn"] = dl * d(Jn) - RG
-        out["Cp"] = dl * d(Jp) + RG
+        out["Cn"] = (dl * d(Jn) - RG) / q["Gbar"]
+        out["Cp"] = (dl * d(Jp) + RG) / q["Gbar"]
     return out
 
 

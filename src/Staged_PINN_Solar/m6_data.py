@@ -68,7 +68,7 @@ def build(out_dir, root=None, limit: int | None = None, report=print) -> dict:
     rng = np.random.default_rng(NODE_SEED)
     t0 = time.time()
     cols = {k: np.zeros(D) for k in MAT_KEYS + ("delta", "Nd", "Na", "phi_eq0", "phi_eq1", "phi_eq0_dpv",
-                                                 "phi_eq1_dpv", "pce", "L_cm")}
+                                                 "phi_eq1_dpv", "pce", "L_cm", "Gbar")}
     xi_hat = np.zeros((D, len(specs)))
     n_V = np.zeros(D, dtype=np.int32)
     split_id = np.array([s for s, _ in refs], dtype=np.int8)
@@ -107,6 +107,7 @@ def build(out_dir, root=None, limit: int | None = None, report=print) -> dict:
                                                                   cols["Eg"][d], cols["Nd"][d], cols["Na"][d])
         cols["phi_eq0_dpv"][d], cols["phi_eq1_dpv"][d] = float(dev.phi_eq[0]), float(dev.phi_eq[-1])
         cols["delta"][d] = dev.delta(scales)
+        cols["Gbar"][d] = float(np.trapezoid(dev.G, dev.x_hat))   # r13 Eq. 28: mean generation on the full grid
         cols["pce"][d] = dev.pce
         cols["L_cm"][d] = dev.xi["L_n"] + dev.xi["L_p"]
         xi_hat[d] = dev.u
