@@ -290,6 +290,57 @@ def fine_voc(ctx: Ctx, model, split: str = "val") -> dict:
     return {d: _first_crossing(vmax[i] * t, J[i]) for i, d in enumerate(ids)}
 
 
+GRID_EXTRA = 8
+
+
+def spline_voc(v: np.ndarray, j: np.ndarray) -> float:
+    """Voc as the root of a cubic spline through all (V, J) points, in the first sign-change interval.
+
+    The linear chord between the two grid points around the crossing sits below a concave
+    J(V), so it crosses zero early: on base_m6 (50 mV grid) the chord is ~5 mV low.
+    """
+    from scipy.interpolate import CubicSpline
+    from scipy.optimize import brentq
+    idx = np.nonzero(j[:-1] * j[1:] <= 0)[0]
+    if idx.size == 0 or v.size < 3:
+        return float("nan")
+    k = int(idx[0])
+    if j[k] == 0:
+        return float(v[k])
+    cs = CubicSpline(v, j)
+    try:
+        return float(brentq(cs, v[k], v[k + 1]))
+    except ValueError:
+        return float("nan")
+
+
+@torch.no_grad()
+def grid_voc(ctx: Ctx, model, split: str = "val", extra: int = GRID_EXTRA) -> dict:
+    """Predicted Voc by the SAME linear chord as the reference, on the dPV grid extended by
+    `extra` points of the last step. Both sides then carry the same interpolation error,
+    so their difference measures the curve, not the interpolation."""
+    ids = [int(d) for d in ctx.ids[split]]
+    grids = []
+    for d in ids:
+        n = int(ctx.n_V[d])
+        v = ctx.V_np[d, :n].astype(float)
+        dv = v[-1] - v[-2]
+        grids.append(np.concatenate([v, v[-1] + dv * np.arange(1, extra + 1)]))
+    sizes = [g.size for g in grids]
+    volts = np.concatenate(grids)
+    pd = np.repeat(np.asarray(ids), sizes)
+    T = lambda a: torch.as_tensor(a, device=ctx.dev)
+    pd_t = T(pd)
+    s0 = torch.zeros(pd.size, 1, dtype=torch.float64, device=ctx.dev)
+    r0 = model.raw(s0, ctx.xi[pd_t], T(volts / ctx.V_max)[:, None])
+    J = (ctx.attrs["J0"] * ctx.devc["Jgen"][pd_t] * r0[:, 3]).cpu().numpy()
+    out, start = {}, 0
+    for d, g in zip(ids, grids):
+        out[d] = _first_crossing(g, J[start:start + g.size])
+        start += g.size
+    return out
+
+
 def jv_metrics(ctx: Ctx, model, split: str = "val") -> dict:
     """Per material: median absolute error of the curve (RMSE, mA/cm^2), Jsc (mA/cm^2), Voc (V), FF, PCE (pp).
 
@@ -297,9 +348,14 @@ def jv_metrics(ctx: Ctx, model, split: str = "val") -> dict:
     devices, Voc_bias_mV = signed median (positive = predicted Voc too high),
     invalid_Voc_fine = devices with no predicted crossing even on the fine grid,
     curve_to_voc = curve RMSE (mA/cm^2) restricted to reference points with J >= 0.
+    Like-for-like Voc (see `grid_voc`, `spline_voc`): Voc_grid = median |Voc error| (V) with the
+    same chord on both sides, Voc_grid_bias_mV its signed median, invalid_Voc_grid the devices
+    with no predicted crossing on the extended grid; Voc_bias_spline_mV = signed median of the
+    fine-grid prediction minus the spline reference.
     """
     Jp = predicted_currents(ctx, model, split)
     vf = fine_voc(ctx, model, split)
+    vg = grid_voc(ctx, model, split)
     rows = []
     for d, j in Jp.items():
         n = int(ctx.n_V[d])
@@ -309,7 +365,8 @@ def jv_metrics(ctx: Ctx, model, split: str = "val") -> dict:
         rows.append((ctx.material[d], 1e3 * float(np.sqrt(np.mean((j - jr) ** 2))),
                      0.1 * abs(a["jsc"] - b["jsc"]), abs(a["voc"] - b["voc"]), 100 * abs(a["ff"] - b["ff"]),
                      100 * abs(a["pce"] - b["pce"]), vf[d] - b["voc"],
-                     1e3 * float(np.sqrt(np.mean((j[keep] - jr[keep]) ** 2)))))
+                     1e3 * float(np.sqrt(np.mean((j[keep] - jr[keep]) ** 2))),
+                     vg[d] - b["voc"], vf[d] - spline_voc(v, jr)))
     out = {}
     for mat in sorted(set(r[0] for r in rows)) + ["all"]:
         sel = np.array([r[1:] for r in rows if mat == "all" or r[0] == mat], dtype=float)
@@ -321,6 +378,11 @@ def jv_metrics(ctx: Ctx, model, split: str = "val") -> dict:
         out[mat]["Voc_bias_mV"] = 1e3 * float(np.nanmedian(bias)) if np.isfinite(bias).any() else float("nan")
         out[mat]["invalid_Voc_fine"] = int((~np.isfinite(bias)).sum())
         out[mat]["curve_to_voc"] = float(np.nanmedian(sel[:, 6]))
+        grid, spl = sel[:, 7], sel[:, 8]
+        out[mat]["Voc_grid"] = float(np.nanmedian(np.abs(grid))) if np.isfinite(grid).any() else float("nan")
+        out[mat]["Voc_grid_bias_mV"] = 1e3 * float(np.nanmedian(grid)) if np.isfinite(grid).any() else float("nan")
+        out[mat]["invalid_Voc_grid"] = int((~np.isfinite(grid)).sum())
+        out[mat]["Voc_bias_spline_mV"] = 1e3 * float(np.nanmedian(spl)) if np.isfinite(spl).any() else float("nan")
     return out
 
 

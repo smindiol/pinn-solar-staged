@@ -122,10 +122,26 @@ def objective(ctx, model, plan, lam, physics=True, backward=False,
     return values, total
 
 
-def gradient_weights(ctx, model, plan, anchors=False):
-    """Balance DATA group gradient norms, once on clean training data.
+LEGACY_CAP = (.01, 100.)
 
-    Potential group is the reference (weight 1); constrain ratios to [.01,100].
+
+def group_multipliers(norms, cap=LEGACY_CAP):
+    """Multiplier of each data group = potential-group gradient norm / its own norm.
+
+    `cap` = (low, high) clips the ratios (the E9c heuristic, kept as the default so old runs
+    reproduce); cap=None balances exactly. A norm floor of 1e-12 guards a vanishing group.
+    """
+    reference = max(norms["potential"], 1e-12)
+    raw = {k: reference / max(v, 1e-12) for k, v in norms.items()}
+    if cap is None:
+        return {k: float(v) for k, v in raw.items()}
+    return {k: float(np.clip(v, cap[0], cap[1])) for k, v in raw.items()}
+
+
+def gradient_weights(ctx, model, plan, anchors=False, cap=LEGACY_CAP):
+    """Balance DATA group gradient norms on clean training data.
+
+    Potential group is the reference (weight 1); ratios clipped to `cap` (None = no clip).
     Physical-term weights remain Eq39. Persist all norms and weights.
     """
     keys = base.DATA_TERMS + base.PHYS_TERMS + ("JV",)
@@ -139,12 +155,10 @@ def gradient_weights(ctx, model, plan, anchors=False):
     model.zero_grad(set_to_none=True)
     if not all(np.isfinite(v) and v > 0 for v in norms.values()):
         raise FloatingPointError(f"Invalid calibration gradient norms: {norms}")
-    reference = max(norms["potential"], 1e-12)
-    weights = {k: float(np.clip(reference / max(v, 1e-12), .01, 100.)) for k, v in norms.items()}
-    return weights, norms
+    return group_multipliers(norms, cap), norms
 
 
-def make_weights(ctx, model, plan, variant, anchors=False):
+def make_weights(ctx, model, plan, variant, anchors=False, cap=LEGACY_CAP):
     unit = {k: 1. for k in base.DATA_TERMS + base.PHYS_TERMS + ("JV",)}
     values, _ = objective(ctx, model, plan, unit, anchors=anchors)
     old = base.lambdas(values)
@@ -156,7 +170,7 @@ def make_weights(ctx, model, plan, variant, anchors=False):
         # One common baseline scale; new term starts at order one.
         lam["JV"] = 10. ** -np.floor(np.log10(max(float(values["JV"]), 1e-12)))
     elif variant in ("balanced", "control"):
-        weights, norms = gradient_weights(ctx, model, plan, anchors)
+        weights, norms = gradient_weights(ctx, model, plan, anchors, cap)
         for group, keys in GROUPS.items():
             for key in keys:
                 lam[key] = old["data"] * weights[group]
@@ -179,8 +193,15 @@ def evaluate(ctx, model, lam, anchors=False):
 
 def run_case(root, variant="balanced", noise_sigma=0., seed=0, gpu=0,
              pre_steps=50, adam_steps=50, lbfgs_iters=3, limit=None,
-             devices=64, lb_devices=64, tag="e9_current", anchors=False):
+             devices=64, lb_devices=64, tag="e9_current", anchors=False,
+             weight_cap=LEGACY_CAP, recalib_every=0, adam_lr=None, lbfgs_val_every=0):
     """New pilot defaults to 100 Adam steps; production can request 2000/500.
+
+    weight_cap: clip of the data-group multipliers (None = exact balance, E9f).
+    recalib_every: recompute the multipliers every N Adam steps (0 = once after pretraining).
+    adam_lr: Adam peak learning rate (None = base.ADAM_LR).
+    lbfgs_val_every: during L-BFGS, validate every N evaluations and keep the best
+    checkpoint (0 = no validation inside L-BFGS, the old behaviour).
 
     All variants start from identical RANDOM weights, but have their own
     pretraining: compares the full supervision strategy, not common fine-tuning.
@@ -196,24 +217,32 @@ def run_case(root, variant="balanced", noise_sigma=0., seed=0, gpu=0,
     physics = variant != "control"
     log = base.Log(out, suffix)
     calibration = spatial.Plan(ctx, "train", seed, 20000, 64, 75)
-    lam, calibration_pre = make_weights(ctx, model, calibration, variant, anchors)
+    lam, calibration_pre = make_weights(ctx, model, calibration, variant, anchors, weight_cap)
     result = {"variant": variant, "noise_sigma_in_Jgen_units": noise_sigma,
               "status": "running", "initial_weights": fingerprint(model),
               "pre_calibration": calibration_pre, "devices": devices, "lb_devices": lb_devices,
               "nodes": 75, "physics": physics, "anchors": anchors,
+              "weight_cap": None if weight_cap is None else list(weight_cap),
+              "recalib_every": recalib_every, "lbfgs_val_every": lbfgs_val_every,
+              "adam_lr": adam_lr or base.ADAM_LR, "recalibrations": [],
               "pre_steps_requested": pre_steps, "adam_steps_requested": adam_steps,
               "lbfgs_iters_requested": lbfgs_iters, "checkpoints": []}
     steps._write(out / "summary.json", result)
     for phase, n, lr, use_physics in (("pre", pre_steps, base.PRE_LR, False),
-                                       ("adam", adam_steps, base.ADAM_LR, physics)):
+                                       ("adam", adam_steps, adam_lr or base.ADAM_LR, physics)):
         if phase == "adam":
-            lam, record = make_weights(ctx, model, calibration, variant, anchors)
+            lam, record = make_weights(ctx, model, calibration, variant, anchors, weight_cap)
             result["post_pre_calibration"] = record
         opt = torch.optim.Adam(model.parameters(), lr=lr)
         sch = base._cosine(opt, n, lr, base.LR_MIN)
         started = time.monotonic()
         for i in range(n):
             check_budget()
+            if phase == "adam" and recalib_every and i and i % recalib_every == 0:
+                lam, record = make_weights(ctx, model, calibration, variant, anchors, weight_cap)
+                result["recalibrations"].append({"step": i, "multipliers": record.get("data_group_multipliers"),
+                                                 "norms": record.get("data_gradient_norms")})
+                log.line(f"recalib {variant} step={i} multipliers={record.get('data_group_multipliers')}")
             step_seed = 10000+i if phase == "pre" else 30000+i
             plan = spatial.Plan(ctx, "train", seed, step_seed, devices, 75)
             opt.zero_grad(set_to_none=True)
@@ -259,6 +288,17 @@ def run_case(root, variant="balanced", noise_sigma=0., seed=0, gpu=0,
             count += 1
             if count == 1 or count % 50 == 0:
                 log.line(f"LBFGS {variant} evaluation={count} total={float(loss):.4e} {base._fmt(values)}")
+            if lbfgs_val_every and count % lbfgs_val_every == 0:
+                record = {"phase": "lbfgs", "step": count, "loss": float(loss),
+                          "terms": {k: float(v) for k, v in values.items()},
+                          "validation": base.jv_metrics(ctx, model)}
+                result["checkpoints"].append(record)
+                log.rec(**record)
+                curve = record["validation"]["all"]["curve"]
+                if np.isfinite(curve) and curve < result.get("best", {}).get("curve", np.inf):
+                    result["best"] = {"phase": "lbfgs", "step": count, "curve": curve}
+                    torch.save({"state": base._state(model), "lambda": lam,
+                                "phase": "lbfgs", "step": count}, out / "best.pt")
             return loss
 
         started = time.monotonic()

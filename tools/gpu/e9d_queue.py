@@ -9,6 +9,9 @@ Usage:
     python tools/gpu/e9d_queue.py --smoke    # short memory/timing check
     python tools/gpu/e9d_queue.py --tag e9e --arms control_anchor:0
                                              # E9e: control with Voc/MPP anchors
+    python tools/gpu/e9d_queue.py --tag e9f_smoke --arms control:0,balanced:0 \
+        --steps 300,500,50 --weight-cap none --recalib 250 --adam-lr 3e-4 --lbfgs-val 25
+                                             # E9f: exact group balance, periodic recalibration
 
 Environment:
     DPV_BASE_M6          folder holding base_m6.h5
@@ -68,9 +71,20 @@ def main():
     parser.add_argument("--smoke", action="store_true")
     parser.add_argument("--tag", default="e9d")
     parser.add_argument("--arms", default=None, help="e.g. control_anchor:0,balanced_anchor:0")
+    parser.add_argument("--steps", default=None, help="pre,adam,lbfgs overriding the config, e.g. 300,500,50")
+    parser.add_argument("--weight-cap", default="legacy", choices=("legacy", "none"),
+                        help="legacy = clip group multipliers to [.01,100]; none = exact balance")
+    parser.add_argument("--recalib", type=int, default=0, help="recompute multipliers every N Adam steps")
+    parser.add_argument("--adam-lr", type=float, default=None, help="Adam peak learning rate")
+    parser.add_argument("--lbfgs-val", type=int, default=0, help="validate every N L-BFGS evaluations")
     args = parser.parse_args()
     arms = parse_arms(args.arms) if args.arms else ARMS
-    tag, config = (f"{args.tag}_smoke", SMOKE) if args.smoke else (args.tag, FULL)
+    tag, config = (f"{args.tag}_smoke", dict(SMOKE)) if args.smoke else (args.tag, dict(FULL))
+    if args.steps:
+        pre, adam, lbfgs = (int(x) for x in args.steps.split(","))
+        config.update(pre_steps=pre, adam_steps=adam, lbfgs_iters=lbfgs)
+    config.update(weight_cap=None if args.weight_cap == "none" else fit.LEGACY_CAP,
+                  recalib_every=args.recalib, adam_lr=args.adam_lr, lbfgs_val_every=args.lbfgs_val)
     root = str(m6_data.ensure(None))
     print(f"[queue] tag={tag} config={config} data={root}", flush=True)
     for variant, seed, anchors in arms:
