@@ -66,7 +66,16 @@ def run_case(ctx, model, arm, lam, rows, adam_devices, lbfgs_devices, log):
     opt.step(closure)
     synchronize(ctx)
     result["lbfgs_total_seconds"] = time.monotonic() - start
-    result["lbfgs_iterations"] = next(iter(opt.state.values())).get("n_iter", 0)
+    state = next(iter(opt.state.values()))
+    result["lbfgs_iterations"] = state.get("n_iter", 0)
+    result["lbfgs_history"] = {
+        "configured_capacity": opt.param_groups[0]["history_size"],
+        "stored_pairs": len(state.get("old_dirs", [])),
+        "parameter_difference_vectors": len(state.get("old_stps", [])),
+        "function_evaluations": state.get("func_evals", 0),
+        "recorded_closure_calls": len(result["lbfgs"]),
+    }
+    log.line(f"SHORT {arm} {adam_devices}/{lbfgs_devices} HISTORY " + json.dumps(result["lbfgs_history"]))
     if result["lbfgs_iterations"] > 3:
         raise AssertionError("Short smoke exceeded its three-iteration budget")
     if not all(torch.isfinite(p).all() for p in model.parameters()):
