@@ -194,7 +194,8 @@ def evaluate(ctx, model, lam, anchors=False):
 def run_case(root, variant="balanced", noise_sigma=0., seed=0, gpu=0,
              pre_steps=50, adam_steps=50, lbfgs_iters=3, limit=None,
              devices=64, lb_devices=64, tag="e9_current", anchors=False,
-             weight_cap=LEGACY_CAP, recalib_every=0, adam_lr=None, lbfgs_val_every=0):
+             weight_cap=LEGACY_CAP, recalib_every=0, adam_lr=None, lbfgs_val_every=0,
+             keep_every=0):
     """New pilot defaults to 100 Adam steps; production can request 2000/500.
 
     weight_cap: clip of the data-group multipliers (None = exact balance, E9f).
@@ -202,6 +203,7 @@ def run_case(root, variant="balanced", noise_sigma=0., seed=0, gpu=0,
     adam_lr: Adam peak learning rate (None = base.ADAM_LR).
     lbfgs_val_every: during L-BFGS, validate every N evaluations and keep the best
     checkpoint (0 = no validation inside L-BFGS, the old behaviour).
+    keep_every: also keep <phase>_<step>.pt every N steps, never overwritten (0 = off).
 
     All variants start from identical RANDOM weights, but have their own
     pretraining: compares the full supervision strategy, not common fine-tuning.
@@ -270,6 +272,9 @@ def run_case(root, variant="balanced", noise_sigma=0., seed=0, gpu=0,
                 steps._write(out / "summary.json", result)
                 torch.save({"state": base._state(model), "lambda": lam,
                             "phase": phase, "step": i+1}, out / "latest.pt")
+                if keep_every and (i+1) % keep_every == 0:
+                    torch.save({"state": base._state(model), "lambda": lam,
+                                "phase": phase, "step": i+1}, out / f"{phase}_{i+1:05d}.pt")
         result[f"{phase}_validation"] = evaluate(ctx, model, lam, anchors)
         torch.save({"state": base._state(model), "lambda": lam,
                     "phase": phase, "step": n}, out / f"{phase}.pt")

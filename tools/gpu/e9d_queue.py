@@ -77,6 +77,7 @@ def main():
     parser.add_argument("--recalib", type=int, default=0, help="recompute multipliers every N Adam steps")
     parser.add_argument("--adam-lr", type=float, default=None, help="Adam peak learning rate")
     parser.add_argument("--lbfgs-val", type=int, default=0, help="validate every N L-BFGS evaluations")
+    parser.add_argument("--keep-every", type=int, default=0, help="keep a weights snapshot every N steps")
     args = parser.parse_args()
     arms = parse_arms(args.arms) if args.arms else ARMS
     tag, config = (f"{args.tag}_smoke", dict(SMOKE)) if args.smoke else (args.tag, dict(FULL))
@@ -84,7 +85,8 @@ def main():
         pre, adam, lbfgs = (int(x) for x in args.steps.split(","))
         config.update(pre_steps=pre, adam_steps=adam, lbfgs_iters=lbfgs)
     config.update(weight_cap=None if args.weight_cap == "none" else fit.LEGACY_CAP,
-                  recalib_every=args.recalib, adam_lr=args.adam_lr, lbfgs_val_every=args.lbfgs_val)
+                  recalib_every=args.recalib, adam_lr=args.adam_lr, lbfgs_val_every=args.lbfgs_val,
+                  keep_every=args.keep_every)
     root = str(m6_data.ensure(None))
     print(f"[queue] tag={tag} config={config} data={root}", flush=True)
     for variant, seed, anchors in arms:
