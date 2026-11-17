@@ -257,23 +257,70 @@ def predicted_currents(ctx: Ctx, model, split: str = "val") -> dict:
     return out
 
 
+FINE_POINTS, FINE_SPAN = 400, 1.5
+
+
+def _first_crossing(v: np.ndarray, j: np.ndarray) -> float:
+    """First voltage where J changes sign (linear interpolation), else NaN."""
+    idx = np.nonzero(j[:-1] * j[1:] <= 0)[0]
+    if idx.size == 0:
+        return float("nan")
+    k = int(idx[0])
+    return float(v[k]) if j[k] == j[k + 1] else float(v[k] + j[k] * (v[k + 1] - v[k]) / (j[k] - j[k + 1]))
+
+
+@torch.no_grad()
+def fine_voc(ctx: Ctx, model, split: str = "val") -> dict:
+    """Predicted Voc (V) on a fine grid 0..FINE_SPAN x the last dPV voltage, per device of `split`.
+
+    The dPV grid ends one point after the reference crossing, so a prediction whose
+    Voc is only a few mV high has no sign change on that grid (Voc = NaN there).
+    The fine grid finds the true predicted crossing.
+    """
+    ids = [int(d) for d in ctx.ids[split]]
+    t = np.linspace(0.0, 1.0, FINE_POINTS)
+    vmax = np.array([FINE_SPAN * float(ctx.V_np[d, int(ctx.n_V[d]) - 1]) for d in ids])
+    volts = (vmax[:, None] * t[None, :]).ravel()
+    pd = np.repeat(np.asarray(ids), FINE_POINTS)
+    T = lambda a: torch.as_tensor(a, device=ctx.dev)
+    pd_t = T(pd)
+    s0 = torch.zeros(pd.size, 1, dtype=torch.float64, device=ctx.dev)
+    r0 = model.raw(s0, ctx.xi[pd_t], T(volts / ctx.V_max)[:, None])
+    J = (ctx.attrs["J0"] * ctx.devc["Jgen"][pd_t] * r0[:, 3]).cpu().numpy().reshape(len(ids), FINE_POINTS)
+    return {d: _first_crossing(vmax[i] * t, J[i]) for i, d in enumerate(ids)}
+
+
 def jv_metrics(ctx: Ctx, model, split: str = "val") -> dict:
-    """Per material: median absolute error of the curve (RMSE, mA/cm^2), Jsc (mA/cm^2), Voc (V), FF, PCE (pp)."""
+    """Per material: median absolute error of the curve (RMSE, mA/cm^2), Jsc (mA/cm^2), Voc (V), FF, PCE (pp).
+
+    Extra keys (fine-grid Voc, see `fine_voc`): Voc_fine = median |Voc error| (V) over all
+    devices, Voc_bias_mV = signed median (positive = predicted Voc too high),
+    invalid_Voc_fine = devices with no predicted crossing even on the fine grid,
+    curve_to_voc = curve RMSE (mA/cm^2) restricted to reference points with J >= 0.
+    """
     Jp = predicted_currents(ctx, model, split)
+    vf = fine_voc(ctx, model, split)
     rows = []
     for d, j in Jp.items():
         n = int(ctx.n_V[d])
         v, jr = ctx.V_np[d, :n], ctx.J_np[d, :n]
         a, b = pce.jv_summary(v, j, ctx.attrs["P_in"]), pce.jv_summary(v, jr, ctx.attrs["P_in"])
+        keep = jr >= 0
         rows.append((ctx.material[d], 1e3 * float(np.sqrt(np.mean((j - jr) ** 2))),
                      0.1 * abs(a["jsc"] - b["jsc"]), abs(a["voc"] - b["voc"]), 100 * abs(a["ff"] - b["ff"]),
-                     100 * abs(a["pce"] - b["pce"])))
+                     100 * abs(a["pce"] - b["pce"]), vf[d] - b["voc"],
+                     1e3 * float(np.sqrt(np.mean((j[keep] - jr[keep]) ** 2)))))
     out = {}
     for mat in sorted(set(r[0] for r in rows)) + ["all"]:
         sel = np.array([r[1:] for r in rows if mat == "all" or r[0] == mat], dtype=float)
         out[mat] = {k: float(np.nanmedian(sel[:, i])) for i, k in enumerate(("curve", "Jsc", "Voc", "FF", "PCE"))}
         out[mat]["n"] = int(sel.shape[0])
         out[mat]["invalid_Voc"] = int((~np.isfinite(sel[:, 2])).sum())
+        bias = sel[:, 5]
+        out[mat]["Voc_fine"] = float(np.nanmedian(np.abs(bias))) if np.isfinite(bias).any() else float("nan")
+        out[mat]["Voc_bias_mV"] = 1e3 * float(np.nanmedian(bias)) if np.isfinite(bias).any() else float("nan")
+        out[mat]["invalid_Voc_fine"] = int((~np.isfinite(bias)).sum())
+        out[mat]["curve_to_voc"] = float(np.nanmedian(sel[:, 6]))
     return out
 
 
