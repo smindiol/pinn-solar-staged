@@ -16,6 +16,12 @@ from .m6_capacity import fingerprint
 
 GROUPS = {"potential": ("phi", "phi_n", "phi_p"), "current": ("J_n", "J_p"),
           "terminal": ("JV",)}
+DEADLINE = None
+
+
+def check_budget():
+    if DEADLINE is not None and time.time() >= DEADLINE:
+        raise TimeoutError("Shared notebook execution budget reached")
 
 
 def terminal(model, ctx, plan, noise_sigma=0., noise_seed=0):
@@ -47,6 +53,7 @@ def objective(ctx, model, plan, lam, physics=True, backward=False,
     values = {}
     total = torch.zeros((), dtype=torch.float64, device=ctx.dev)
     for start in range(0, plan.rows, rows):
+        check_budget()
         b = plan.batch(ctx, start, start + rows)
         current = component_terms(model, b, physics)
         weight = b["n_rows"] / plan.rows
@@ -122,7 +129,7 @@ def evaluate(ctx, model, lam):
 
 
 def run_case(root, variant="balanced", noise_sigma=0., seed=0, gpu=0,
-             pre_steps=300, adam_steps=100, lbfgs_iters=0, limit=None):
+             pre_steps=50, adam_steps=50, lbfgs_iters=3, limit=None):
     """New pilot defaults to 100 Adam steps; production can request 2000/500.
 
     All variants start from identical RANDOM weights, but have their own
@@ -154,6 +161,7 @@ def run_case(root, variant="balanced", noise_sigma=0., seed=0, gpu=0,
         sch = base._cosine(opt, n, lr, base.LR_MIN)
         started = time.monotonic()
         for i in range(n):
+            check_budget()
             step_seed = 10000+i if phase == "pre" else 30000+i
             plan = spatial.Plan(ctx, "train", seed, step_seed, 64, 75)
             opt.zero_grad(set_to_none=True)
@@ -229,36 +237,59 @@ def run(root=None, include_noise=False, **kwargs):
     return {"out": str(steps.results_root() / "e9_current"), "include_noise": include_noise}
 
 
-def _comparison_worker(gpu, root, kwargs):
+def _comparison_worker(gpu, root, kwargs, deadline):
+    global DEADLINE
+    DEADLINE = deadline
     torch.cuda.set_device(gpu)
     variant = ("base", "balanced")[gpu]
     try:
         run_case(root, variant, gpu=gpu, **kwargs)
     except Exception as exc:
         out = steps.results_root() / "e9_current" / f"{variant}_noise0_seed{kwargs.get('seed', 0)}"
-        steps._write(out / "failure.json", {"status": "failed", "error": repr(exc)})
-        raise
+        status = "time_budget_exhausted" if isinstance(exc, TimeoutError) else "failed"
+        steps._write(out / "failure.json", {"status": status, "error": repr(exc)})
+        if not isinstance(exc, TimeoutError):
+            raise
 
 
-def run_comparison(root=None, pre_steps=300, adam_steps=100, lbfgs_iters=0, limit=None):
+def run_comparison(root=None, pre_steps=50, adam_steps=50, lbfgs_iters=3, limit=None,
+                   budget_seconds=720):
     """Base-PKC versus corrected-PKC, one seed, one arm per T4; no noise."""
     if torch.cuda.device_count() < 2:
         raise RuntimeError("Two GPUs required")
     root = str(m6_data.ensure(root))
     kwargs = dict(pre_steps=pre_steps, adam_steps=adam_steps, lbfgs_iters=lbfgs_iters,
                   limit=limit, seed=0)
-    torch.multiprocessing.spawn(_comparison_worker, args=(root, kwargs), nprocs=2, join=True)
+    deadline = time.time() + budget_seconds
+    processes = torch.multiprocessing.spawn(_comparison_worker, args=(root, kwargs, deadline-60),
+                                            nprocs=2, join=False)
+    while not processes.join(timeout=1):
+        if time.time() >= deadline:
+            for process in processes.processes:
+                if process.is_alive():
+                    process.terminate()
+            for process in processes.processes:
+                process.join(timeout=5)
+            break
     out = steps.results_root() / "e9_current"
-    arms = {v: json.loads((out / f"{v}_noise0_seed0" / "summary.json").read_text())
-            for v in ("base", "balanced")}
-    if len({r["initial_weights"] for r in arms.values()}) != 1:
+    arms = {}
+    for variant in ("base", "balanced"):
+        folder = out / f"{variant}_noise0_seed0"
+        path = folder / "summary.json"
+        arm = json.loads(path.read_text()) if path.exists() else {}
+        failure = folder / "failure.json"
+        if failure.exists():
+            arm.update(json.loads(failure.read_text()))
+        if arm.get("status") == "running" or not arm:
+            arm["status"] = "time_budget_exhausted"
+        arms[variant] = arm
+    if all("initial_weights" in r for r in arms.values()) and len({r["initial_weights"] for r in arms.values()}) != 1:
         raise AssertionError("Arms did not start from identical random weights")
-    if not all(r["status"] == "ok" for r in arms.values()):
-        raise RuntimeError("A comparison arm did not complete")
-    result = {"status": "ok", "seed": 0, "noise": False,
+    status = "ok" if all(r["status"] == "ok" for r in arms.values()) else "incomplete"
+    result = {"status": status, "seed": 0, "noise": False, "budget_seconds": budget_seconds,
               "configuration": kwargs, "arms": arms}
     steps._write(out / "comparison.json", result)
-    return {"status": "ok", "out": str(out), "configuration": kwargs}
+    return {"status": status, "out": str(out), "configuration": kwargs}
 
 
 def run_smoke(root=None):
