@@ -16,9 +16,9 @@ os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 from . import carriers, m6_data, pce, steps, m6_sampling
 
-TAG = "e9c_254x150"
+TAG = "e9c_254x150_pre300"
 WIDTH, DEPTH = 256, 5
-PRE_EPOCHS, PRE_LR, N_DEV = 300, 1e-3, 254
+PRE_STEPS, PRE_LR, N_DEV = 300, 1e-3, 254
 ADAM_STEPS, ADAM_LR, LR_MIN, CLIP = 2000, 1e-4, 5e-6, 1.0
 LBFGS_ITERS = 500
 N_DEV_PHYS = 254
@@ -295,10 +295,10 @@ def _state(model) -> dict:
 
 
 # --- phases -------------------------------------------------------------------------------------------------
-def pretrain(ctx, model, seed, log, epochs=PRE_EPOCHS, deadline=None) -> dict:
-    """Data term only, `epochs` passes over the training devices in batches of N_DEV with all their voltages."""
-    per_epoch = max(1, math.ceil(ctx.ids["train"].size / N_DEV))
-    n_steps = epochs * per_epoch
+def pretrain(ctx, model, seed, log, n_steps=PRE_STEPS, deadline=None) -> dict:
+    """Exactly n_steps stochastic data updates, drawing a fresh batch each time."""
+    if n_steps < 1:
+        raise ValueError("pretraining steps must be positive")
     opt = torch.optim.Adam(model.parameters(), lr=PRE_LR)
     sch = _cosine(opt, n_steps, PRE_LR, LR_MIN)
     rng = np.random.default_rng(1000 + seed)
@@ -314,7 +314,7 @@ def pretrain(ctx, model, seed, log, epochs=PRE_EPOCHS, deadline=None) -> dict:
         first = first if first is not None else float(loss)
         if i == 0 or (i + 1) % EVERY == 0 or i == n_steps - 1:
             el = time.time() - t0
-            log.line(f"PRE seed={seed} step {i + 1}/{n_steps} (epoch {i // per_epoch + 1}) data={float(loss):.3e} "
+            log.line(f"PRE seed={seed} step {i + 1}/{n_steps} data={float(loss):.3e} "
                      f"{_fmt(L)} lr={sch.get_last_lr()[0]:.2e} eta={el / (i + 1) * (n_steps - i - 1) / 60:.1f}min")
             log.rec(phase="pre", seed=seed, step=i + 1, total=float(loss), **{k: float(v) for k, v in L.items()},
                     lr=sch.get_last_lr()[0], t=el)
@@ -422,7 +422,7 @@ def train_arm(ctx, model, arm, lam, seed, log, out, adam_steps=ADAM_STEPS, lbfgs
     return res
 
 
-def run_seed(seed: int, gpu: int = 0, root=None, limit=None, pre_epochs=PRE_EPOCHS, adam_steps=ADAM_STEPS,
+def run_seed(seed: int, gpu: int = 0, root=None, limit=None, pre_steps=PRE_STEPS, adam_steps=ADAM_STEPS,
              lbfgs_iters=LBFGS_ITERS, arms=tuple(ARMS), hours=HOURS, run_label=None) -> dict:
     """One seed on one device: pretraining, Eq. 39, then every arm from theta_pre."""
     t_start = time.time()
@@ -447,7 +447,7 @@ def run_seed(seed: int, gpu: int = 0, root=None, limit=None, pre_epochs=PRE_EPOC
     else:
         safe_rows = ctx.chunk_rows
         ctx.chunk_rows = min(1024, safe_rows)
-        pre = pretrain(ctx, model, seed, log, pre_epochs, deadline)
+        pre = pretrain(ctx, model, seed, log, pre_steps, deadline)
         ctx.chunk_rows = safe_rows
         torch.save({"state": _state(model), "pre": pre}, pre_path)
     theta_pre = _state(model)
@@ -514,7 +514,7 @@ def run_seeds_45() -> dict:
 
 def run_smoke() -> dict:
     """Kaggle smoke (~5 min): both GPUs, seeds 0 and 1, every arm, a few steps of each phase."""
-    return run_kernel((0, 1), pre_epochs=1, adam_steps=20, lbfgs_iters=10, hours=0.15)
+    return run_kernel((0, 1), pre_steps=1, adam_steps=20, lbfgs_iters=10, hours=0.15)
 
 
 def _arm_worker(gpu, kw):
