@@ -13,7 +13,7 @@ import torch
 from . import m6c, m6_data, m6_sampling as sampling, steps
 from .m6_capacity import fingerprint
 
-CASES = ((64, 16), (128, 32), (256, 64))
+CASES = ((64, 16), (64, 32), (64, 64), (128, 16), (128, 32), (128, 64))
 
 
 def synchronize(ctx):
