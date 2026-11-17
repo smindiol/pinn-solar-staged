@@ -27,11 +27,14 @@ if tmux has-session -t "$SESSION" 2>/dev/null; then
     echo "[gpu_launch] session $SESSION already exists; refusing"; exit 3
 fi
 
-# PIDs that belong to our own tmux jobs (and their children).
+# PIDs of the tmux sessions this launcher started (tagged @gpu_launch=1) and their
+# descendants. Other tmux sessions on the shared account are NOT ours.
 ours() {
-    for p in $(tmux list-panes -a -F '#{pane_pid}' 2>/dev/null); do
-        echo "$p"; pgrep -P "$p" -d ' ' 2>/dev/null | tr ' ' '\n'
-        for c in $(pgrep -P "$p" 2>/dev/null); do pgrep -P "$c" 2>/dev/null; done
+    local panes p
+    panes=$(tmux list-panes -a -F '#{pane_pid} #{@gpu_launch}' 2>/dev/null | awk '$2 == 1 {print $1}' || true)
+    for p in $panes; do
+        echo "$p"
+        pstree -p "$p" 2>/dev/null | grep -o '([0-9]\+)' | tr -d '()' || true
     done | sort -u
 }
 
@@ -60,6 +63,7 @@ if [ $FORCE -eq 0 ]; then
 fi
 
 tmux new -d -s "$SESSION" "bash -c '$CMD' 2>&1 | tee $LOG; echo; echo '[job finished]'; bash"
+tmux set-option -t "$SESSION" @gpu_launch 1
 echo "[gpu_launch] started tmux session $SESSION, log $LOG"
 
 # Full-screen, read-only monitor on the workstation desktop.
